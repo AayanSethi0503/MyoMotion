@@ -71,8 +71,10 @@ CONFIG: dict = {
         "squat": ("ECCENTRIC", "ISOMETRIC_HOLD", "CONCENTRIC"),
         "bench_press": ("ECCENTRIC", "ISOMETRIC_HOLD", "CONCENTRIC"),
         "deadlift": ("CONCENTRIC", "ISOMETRIC_HOLD", "ECCENTRIC"),
+        "grip": ("CONCENTRIC", "ISOMETRIC_HOLD", "ECCENTRIC"),  # bench test: hand gripper, forearm flexors
     },
     "phase_labels": {"ECCENTRIC": "DOWN", "ISOMETRIC_HOLD": "HOLD", "CONCENTRIC": "UP", "REST": "REST"},
+    "phase_labels_by_exercise": {"grip": {"CONCENTRIC": "SQUEEZE", "ECCENTRIC": "RELEASE"}},
     "default_channels": ("gluteus_maximus", "vastus_lateralis", "erector_spinae"),
     # live bars
     "bar_window_samples": 25,  # 50 ms at 500 Hz
@@ -355,18 +357,24 @@ def parse_tempo(text: str) -> tuple[float, float, float]:
     return first, second, third
 
 
+def phase_labels_for(exercise: str) -> dict[str, str]:
+    """On-screen and legend names of the phases for an exercise (e.g. SQUEEZE and RELEASE for grip)."""
+    return {**CONFIG["phase_labels"], **CONFIG["phase_labels_by_exercise"].get(exercise, {})}
+
+
 def build_set_plan(exercise: str, reps: int, tempo_s: tuple[float, float, float],
                    rest_between_s: float, baseline_s: float) -> list[PlanStep]:
     """List every step of one guided set in order, using the exercise's phase order from CONFIG."""
     phase_order = CONFIG["phase_order"][exercise]
+    labels = phase_labels_for(exercise)
     steps = [PlanStep("RELAX: stay still (baseline)", baseline_s, event="BASELINE")]
     for number in range(CONFIG["countdown_from"], 0, -1):
         steps.append(PlanStep(f"Starting in {number}", CONFIG["countdown_tick_s"]))
     steps.append(PlanStep("GO", 0.0, event="SET_START", send_sync=True))
     for rep in range(1, reps + 1):
         for phase, duration_s in zip(phase_order, tempo_s):
-            steps.append(PlanStep(CONFIG["phase_labels"][phase], duration_s, event=phase, rep=rep))
-        steps.append(PlanStep(CONFIG["phase_labels"]["REST"], rest_between_s, event="REST", rep=rep))
+            steps.append(PlanStep(labels[phase], duration_s, event=phase, rep=rep))
+        steps.append(PlanStep(labels["REST"], rest_between_s, event="REST", rep=rep))
     steps.append(PlanStep("STOP", 0.0, event="SET_END", send_sync=True))
     steps.append(PlanStep("RELAX: stay still", CONFIG["tail_relax_s"], event="TAIL"))
     return steps
@@ -618,7 +626,7 @@ def phase_intervals(events: list[SessionEvent], end_t_us: int) -> list[tuple[str
 
 
 def save_session_plot(path: Path, t_us: np.ndarray, values: np.ndarray, channel_names: dict[int, str],
-                      events: list[SessionEvent], title: str) -> None:
+                      events: list[SessionEvent], title: str, phase_labels: dict[str, str]) -> None:
     """Save plot.png: one panel per channel in use, phases shaded, LED flashes as dashed lines."""
     import matplotlib  # imported here so the Agg backend is chosen before pyplot loads
 
@@ -644,7 +652,7 @@ def save_session_plot(path: Path, t_us: np.ndarray, values: np.ndarray, channel_
             axis.axvline(seconds(flash), color=CONFIG["led_colour"], linestyle="--", linewidth=1.2)
         axis.plot((t_us - t_us[0]) / 1e6, values[:, index], color="black", linewidth=0.6)
         axis.set_ylabel(f"ch{index + 1}\n{name}", fontsize=8)
-    handles = [Patch(color=colour, alpha=CONFIG["phase_alpha"], label=CONFIG["phase_labels"][phase])
+    handles = [Patch(color=colour, alpha=CONFIG["phase_alpha"], label=phase_labels[phase])
                for phase, colour in CONFIG["phase_colours"].items()]
     handles.append(Line2D([0], [0], color=CONFIG["led_colour"], linestyle="--", label="LED flash"))
     axes[0][0].legend(handles=handles, loc="upper right", fontsize=8, ncol=len(handles))
@@ -670,7 +678,8 @@ def save_session(args: argparse.Namespace, runner: SessionRunner) -> tuple[Path,
     metadata = build_metadata(args, session_name, runner, t_us, events, clock_fit)
     (session_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     title = f"{args.participant} {session_name}  {args.exercise}  {args.posture}"
-    save_session_plot(session_dir / "plot.png", t_us, values, channel_map(args.channels), events, title)
+    save_session_plot(session_dir / "plot.png", t_us, values, channel_map(args.channels), events, title,
+                      phase_labels_for(args.exercise))
     return session_dir, metadata
 
 

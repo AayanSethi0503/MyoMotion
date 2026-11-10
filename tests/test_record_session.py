@@ -92,6 +92,14 @@ def test_deadlift_plan_goes_up_hold_down() -> None:
     assert [event for event, _, _ in phase_cues(plan)] == ["CONCENTRIC", "ISOMETRIC_HOLD", "ECCENTRIC", "REST"]
 
 
+def test_grip_plan_squeezes_holds_then_releases() -> None:
+    """The forearm bench test shows SQUEEZE, HOLD, RELEASE and logs them as concentric, hold, eccentric."""
+    plan = rs.build_set_plan("grip", reps=1, tempo_s=(2.0, 1.0, 2.0), rest_between_s=1.0, baseline_s=5.0)
+    rep_steps = [(step.label, step.event) for step in plan if step.rep is not None]
+    assert rep_steps == [("SQUEEZE", "CONCENTRIC"), ("HOLD", "ISOMETRIC_HOLD"), ("RELEASE", "ECCENTRIC"),
+                         ("REST", "REST")]
+
+
 def test_plan_frames_set_with_baseline_flashes_and_tail() -> None:
     """Baseline and countdown come first, an LED flash starts and ends the set, the relaxed tail is last."""
     plan = rs.build_set_plan("squat", reps=1, tempo_s=(2.0, 1.0, 2.0), rest_between_s=1.0, baseline_s=5.0)
