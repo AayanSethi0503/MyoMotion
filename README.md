@@ -16,8 +16,10 @@ MyoMotion is an advanced biomechanical coaching platform that fuses computer vis
 
 ```
 MyoMotion/
+├── src/myomotion/             # Python package: vision/, biomechanics/, coaching/, (semg/, sync/, models/ planned)
 ├── scripts/
-│   ├── cv/                    # Computer vision pipeline (pose estimation, angles, spine)
+│   ├── demo_deadlift.py       # deadlift demo CLI
+│   ├── cv/                    # Legacy trackers
 │   │   └── deadlift/
 │   │       └── deadlift_tracker.py
 │   ├── semg/                  # sEMG acquisition, MVC normalization, serial logger
@@ -60,10 +62,21 @@ pip install -r requirements.txt
 
 ```bash
 # Always run from the project root
+
+# Deadlift demo: pose + spine proxy + angles + rep phases + form cues. Writes output/*.mp4 and output/*.json
+python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4
+python scripts/demo_deadlift.py --source 0                  # live webcam
+python scripts/demo_deadlift.py --synthetic lumbar_round    # no camera or model needed
+
+# Legacy minimal tracker (hip/knee angles + phase only)
 python scripts/cv/deadlift/deadlift_tracker.py
+
+# Tests
+python -m pytest tests -q
 ```
 
-Press **Q** to quit the live window.
+Film from the **side**, full body in frame, camera about 2-3 m away. Press **Q** to quit a live window.
+Spine/back-rounding cues come from a geometric proxy and are labelled "(proxy)"; see `docs/GAP_ANALYSIS.md` (G-24).
 
 ## Tech Stack
 
