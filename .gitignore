@@ -1,0 +1,43 @@
+# Virtual environment
+.venv/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Model files (large binaries — download separately)
+models/*.task
+models/*.tflite
+models/*.onnx
+models/*.pt
+
+# Dataset files (large, per-participant recordings)
+data/raw/
+data/processed/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and output
+*.log
+output/
+
+# Project context files (internal team docs, not for public repo)
+CLAUDE.md
+Context.md
+
