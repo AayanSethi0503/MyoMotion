@@ -60,7 +60,9 @@ class SpineProxy:
     thoracic_deg: float               # tangent rotation L1 -> T3 (kyphosis proxy)
     lumbar_deg: float                 # tangent rotation SACRUM -> L1 (lumbar flexion proxy)
     pelvic_deg: float                 # inclination from vertical of SACRUM -> L5 (lumbopelvic proxy)
-    source: str = "proxy"
+    source: str = "proxy"             # "proxy" (geometric, no real curvature) | "spinepose" (detected spine points)
+    curvature_visible: bool = True    # False when seen from the front/back: the curve is a straight midline only
+    confidence: float = 0.0           # mean keypoint score for "spinepose"; unused for the proxy
 
     def as_array(self) -> np.ndarray:
         """[9, 2] in SPINE_LABELS order (contract with the future SpinePose output)."""
@@ -106,11 +108,15 @@ def _sample_by_arclength(poly: np.ndarray, fractions: np.ndarray) -> Tuple[np.nd
     return pts, tans
 
 
-def build_spine_proxy(pose: SidePose) -> Optional[SpineProxy]:
+def build_spine_proxy(pose: SidePose, straight: bool = False) -> Optional[SpineProxy]:
     """Fit the two curves through ear / shoulder / hip and sample the 9 spine labels.
 
     Returns None if the anchors are degenerate (zero-length segment or an impossible fold).
+    ``straight=True`` (the person is not side-on, so curvature is invisible in the image) forces a straight midline
+    through the anchors, with all region angles 0 and ``curvature_visible=False``.
     """
+    if not (pose.has("ear") and pose.has("shoulder") and pose.has("hip")):
+        return None                                      # no ear (head cropped / hidden): no proxy spine
     hip, sh, ear = pose["hip"], pose["shoulder"], pose["ear"]
     v1, v2 = sh - hip, ear - sh                      # lower chord (sacral root -> C7), upper chord (C7 -> C1)
     l1, l2 = float(np.hypot(*v1)), float(np.hypot(*v2))
@@ -120,6 +126,10 @@ def build_spine_proxy(pose: SidePose) -> Optional[SpineProxy]:
     beta = math.atan2(u1[0] * u2[1] - u1[1] * u2[0], float(np.dot(u1, u2)))   # signed turn v1 -> v2 (image coords)
     if abs(math.degrees(beta)) > _BETA_LIMIT_DEG:
         return None
+    if straight:
+        beta = 0.0
+        u2 = u1                                          # one straight line through hip and shoulder; ear along it
+        ear = sh + u1 * l2
 
     # Near-circular arcs: end tangents mirror about the chord; the tangent at C7 is the bisector, so the
     # two curves join with G1 continuity.
@@ -160,8 +170,11 @@ def build_spine_proxy(pose: SidePose) -> Optional[SpineProxy]:
     bend = wrap_deg(inclination_from_vertical(sh, ear, facing) - inclination_from_vertical(hip, sh, facing))
 
     curve = np.vstack([tl, cv[1:]])
+    if straight:
+        cervical = thoracic = lumbar = bend = 0.0
     return SpineProxy(points=points, curve=curve, bend_deg=bend, cervical_deg=cervical,
-                      thoracic_deg=thoracic, lumbar_deg=lumbar, pelvic_deg=pelvic)
+                      thoracic_deg=thoracic, lumbar_deg=lumbar, pelvic_deg=pelvic,
+                      curvature_visible=not straight)
 
 
 class SpineBaseline:
@@ -193,3 +206,74 @@ class SpineBaseline:
         cur = np.array([p.bend_deg, p.cervical_deg, p.thoracic_deg, p.lumbar_deg, p.pelvic_deg])
         d = cur - med
         return SpineDelta(*map(float, d))
+
+
+# ---------------------------------------------------------------------------
+# Real spine from detected keypoints (SpinePose [P1]); G-01, G-31
+# ---------------------------------------------------------------------------
+def _catmull_rom(pts: np.ndarray, per_segment: int = 16) -> np.ndarray:
+    """Centripetal-free Catmull-Rom spline THROUGH every point (the curve passes exactly through the keypoints)."""
+    p = np.vstack([2 * pts[0] - pts[1], pts, 2 * pts[-1] - pts[-2]])
+    out = []
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i - 1], p[i], p[i + 1], p[i + 2]
+        t = np.linspace(0.0, 1.0, per_segment, endpoint=False)[:, None]
+        out.append(0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t ** 2
+                          + (-p0 + 3 * p1 - 3 * p2 + p3) * t ** 3))
+    out.append(pts[-1][None, :])
+    return np.vstack(out)
+
+
+def build_spine_from_points(points: np.ndarray, facing: int, scores: Optional[np.ndarray] = None,
+                            min_confidence: float = 0.25, curvature_visible: bool = True,
+                            source: str = "spinepose") -> Optional[SpineProxy]:
+    """Region angles from the 9 detected spine points ``[9, 2]`` in ``SPINE_LABELS`` order (C1 ... SACRUM).
+
+    Unlike the geometric proxy, these points come from a model that looks at the image, so a curved back gives
+    curved points and real region angles. Each region angle is the rotation of the spine's direction between the
+    region's lower and upper end, measured from the segments between neighbouring points, flexion positive:
+
+        lumbar    = tangent at L1 - tangent at SACRUM          pelvic = inclination of SACRUM -> L5
+        thoracic  = tangent at T3 - tangent at L1              cervical = tangent at C1 - tangent at C7
+        bend      = chord(C7 -> C1) direction - chord(SACRUM -> C7) direction
+
+    Returns None if the points are not a plausible spine (low confidence, or not ordered along SACRUM -> C1).
+    ``curvature_visible=False`` (seen from the front/back) keeps the real points and curve for drawing but zeroes
+    the angles: a side-to-side offset in the image is not spinal flexion. ``source`` tags where the points came from
+    ("spinepose": a trained spine network; "contour": the back silhouette, G-32).
+    """
+    pts = np.asarray(points, float)
+    if pts.shape != (9, 2) or not np.all(np.isfinite(pts)):
+        return None
+    conf = float(np.mean(scores)) if scores is not None else 1.0
+    if conf < min_confidence:
+        return None
+    up = pts[::-1]                                        # SACRUM, L5, L3, L1, T8, T3, C7, C4, C1 (bottom to top)
+    chord = up[-1] - up[0]
+    length = float(np.hypot(*chord))
+    if length < 1e-6:
+        return None
+    along = (up - up[0]) @ (chord / length)               # position of each point along the sacrum -> C1 chord
+    if np.any(np.diff(along) < -0.02 * length):           # not monotonic: the detection is scrambled
+        return None
+
+    d = [inclination_from_vertical(up[i], up[i + 1], facing) for i in range(8)]   # direction of each segment, upward
+    if not all(math.isfinite(v) for v in d):
+        return None
+
+    def avg(a: float, b: float) -> float:                 # mean of two directions without a +-180 wrap problem
+        return a + wrap_deg(b - a) / 2.0
+
+    t_sacrum, t_l1 = d[0], avg(d[2], d[3])
+    t_t3, t_c7, t_c1 = avg(d[4], d[5]), avg(d[5], d[6]), d[7]
+    lumbar = wrap_deg(t_l1 - t_sacrum)
+    thoracic = wrap_deg(t_t3 - t_l1)
+    cervical = wrap_deg(t_c1 - t_c7)
+    pelvic = d[0]
+    bend = wrap_deg(inclination_from_vertical(up[6], up[8], facing) - inclination_from_vertical(up[0], up[6], facing))
+    if not curvature_visible:
+        lumbar = thoracic = cervical = bend = pelvic = 0.0
+    labelled = {label: pts[i].copy() for i, label in enumerate(SPINE_LABELS)}
+    return SpineProxy(points=labelled, curve=_catmull_rom(up), bend_deg=bend, cervical_deg=cervical,
+                      thoracic_deg=thoracic, lumbar_deg=lumbar, pelvic_deg=pelvic, source=source,
+                      curvature_visible=curvature_visible, confidence=conf)

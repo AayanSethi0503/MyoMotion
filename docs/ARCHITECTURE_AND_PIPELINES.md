@@ -150,7 +150,7 @@ Optional Phase-2 branches: [P5] CVCSPC/MD self-supervised pretraining on unlabel
 
 ## ARCH-4. Athlete calibration (Tier 2) — research / FYP-evaluation protocol only
 
-> **D-01 (resolved 2026-11-15):** the released app is 100% camera-only. This flow is run by the team, with sEMG on, on consenting test participants, to evaluate whether personalisation helps. It is not an app feature. The last step ("camera-only coaching") is how the personalised model is then *evaluated*.
+> **D-01 (resolved 2026-11-15, wording corrected 2026-11-18):** the released app is sensor-free (live camera or uploaded video; no sEMG). This flow is run by the team, with sEMG on, on consenting test participants, to evaluate whether personalisation helps. It is not an app feature. The last step ("camera-only coaching") is how the personalised model is then *evaluated*.
 
 ```mermaid
 sequenceDiagram
@@ -178,7 +178,7 @@ sequenceDiagram
   else fails
     C->>R: keep Tier 1 for this athlete, store y_athlete for audit
   end
-  App->>U: remove sensors → camera-only evaluation of the personalised model
+  App->>U: remove sensors → sensor-free (camera or uploaded video) evaluation of the personalised model
 ```
 
 ---

@@ -128,11 +128,18 @@ class SlidingSlope:
     """Least-squares slope (units/s) of samples inside a trailing time window.
 
     Works with irregular timestamps (variable frame rate, dropped frames).
+
+    Low-frame-rate rescue: normally the slope uses the samples of the last ``window_s`` seconds. If that window holds
+    fewer than ``min_samples`` (the pipeline is running slowly, e.g. the heavy pose model on a laptop CPU at < 8 fps),
+    and ``max_window_s`` is set, the window is stretched back over the last ``min_samples`` samples as long as they
+    span no more than ``max_window_s``. At normal frame rates the behaviour is identical to the original (G-17, G-29).
     """
 
-    def __init__(self, window_s: float = VELOCITY_WINDOW_S, min_samples: int = 4):
+    def __init__(self, window_s: float = VELOCITY_WINDOW_S, min_samples: int = 4,
+                 max_window_s: Optional[float] = None):
         self._window = window_s
         self._min_samples = min_samples
+        self._max_window = max_window_s if max_window_s is not None else window_s
         self._buf: Deque[Tuple[float, float]] = deque()
 
     def clear(self) -> None:
@@ -140,22 +147,28 @@ class SlidingSlope:
 
     def add(self, t: float, x: float) -> None:
         self._buf.append((t, x))
-        cutoff = t - self._window
+        cutoff = t - self._max_window
         while self._buf and self._buf[0][0] < cutoff:
             self._buf.popleft()
 
     def slope(self) -> Optional[float]:
-        n = len(self._buf)
-        if n < self._min_samples:
+        if not self._buf:
             return None
-        if self._buf[-1][0] - self._buf[0][0] < 0.6 * self._window:
-            return None
-        mt = sum(t for t, _ in self._buf) / n
-        mx = sum(x for _, x in self._buf) / n
-        den = sum((t - mt) ** 2 for t, _ in self._buf)
+        t_last = self._buf[-1][0]
+        pts = [(t, x) for t, x in self._buf if t >= t_last - self._window]
+        if len(pts) < self._min_samples or pts[-1][0] - pts[0][0] < 0.6 * self._window:
+            if self._max_window <= self._window or len(self._buf) < self._min_samples:
+                return None
+            pts = list(self._buf)[-self._min_samples:]                 # stretch back to min_samples samples
+            if pts[-1][0] - pts[0][0] > self._max_window:
+                return None
+        n = len(pts)
+        mt = sum(t for t, _ in pts) / n
+        mx = sum(x for _, x in pts) / n
+        den = sum((t - mt) ** 2 for t, _ in pts)
         if den <= 0.0:
             return None
-        return sum((t - mt) * (x - mx) for t, x in self._buf) / den
+        return sum((t - mt) * (x - mx) for t, x in pts) / den
 
 
 class KeypointSmoother:

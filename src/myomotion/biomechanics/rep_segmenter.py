@@ -193,7 +193,7 @@ class DeadliftRepSegmenter:
 
         self._hip_ch = AngleChannel()
         self._knee_ch = AngleChannel()
-        self._slope = SlidingSlope()
+        self._slope = SlidingSlope(max_window_s=1.0)     # low-fps rescue, identical at >= 10 fps [G-29]
         self._hip: Optional[float] = None
         self._knee: Optional[float] = None
         self._velocity: Optional[float] = None
