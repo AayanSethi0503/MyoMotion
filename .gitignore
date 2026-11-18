@@ -25,7 +25,8 @@ data/raw/
 data/processed/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-docs/Research Papers/
+docs/resarchpapers/
+
 
 # Jupyter
 .ipynb_checkpoints/

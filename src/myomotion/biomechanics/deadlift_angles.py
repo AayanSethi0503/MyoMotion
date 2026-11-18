@@ -24,8 +24,9 @@ import numpy as np
 
 from .geometry import distance, inclination_from_vertical, joint_angle, wrap_deg
 from .landmarks import (L_ANKLE, L_HIP, L_KNEE, L_SHOULDER, R_ANKLE, R_HIP, R_KNEE, R_SHOULDER, SidePose,
-                        extract_side_pose, landmark_reliable)
-from .spine_proxy import SpineProxy, build_spine_proxy
+                        extract_midline_pose, extract_side_pose, landmark_reliable)
+from .pose3d import compute_angles_3d
+from .spine_proxy import SpineProxy, build_spine_from_points, build_spine_proxy
 
 
 @dataclass(frozen=True)
@@ -49,27 +50,44 @@ class DeadliftAngles:
     bar_height_torso: Optional[float]        # height above the floor, torso lengths, up = +
     bar_drift_foot: Optional[float]          # horizontal offset from mid-foot in foot lengths, forward = +
     pose: SidePose                           # the near-side landmarks used (for drawing)
+    feet_visible: bool = True                # heel + toe seen; False = bar-drift reference unavailable
+    view: str = "side"                       # "side": exact 2-D image angles. "angled": 3-D world angles (G-30)
+    angle_source: str = "image"              # "image" | "world"
 
 
 def compute_deadlift_angles(lm: np.ndarray, t_s: float, side: Optional[str] = None,
-                            bar_xy: Optional[np.ndarray] = None) -> Optional[DeadliftAngles]:
-    """Angles for one frame, or None if the near-side landmarks are unreliable / degenerate.
+                            bar_xy: Optional[np.ndarray] = None,
+                            facing: Optional[int] = None,
+                            world: Optional[np.ndarray] = None,
+                            view: str = "side",
+                            spine_points: Optional[np.ndarray] = None,
+                            spine_scores: Optional[np.ndarray] = None,
+                            spine_source: str = "spinepose") -> Optional[DeadliftAngles]:
+    """Angles for one frame, or None if the core joints of the chosen side are unreliable / degenerate.
 
-    ``bar_xy``: optional (x, y) px centre of a detected barbell (YOLO ROI, [X1]/[P5]). If absent the
-    wrist of the near side is used as the bar proxy (arms hang straight in a deadlift).
+    ``view="side"``: exact 2-D image angles from the chosen near side (the original, validated path).
+    ``view="angled"`` with ``world`` (MediaPipe world landmarks ``[33, 3]``): hip/knee/trunk/tibia come from the
+    view-independent 3-D midline angles instead, so a lifter who is not side-on, faces the camera, or shows their
+    left side is measured correctly (G-30). The 2-D landmarks are still used for drawing, scale and the bar.
+
+    ``spine_points`` (``[9, 2]`` or ``[9, 3]`` px, ``SPINE_LABELS`` order; from SpinePose or the back contour, named by
+    ``spine_source``) replaces the geometric proxy.
+    Their region angles are only meaningful side-on; from other views the real points are kept for drawing but the
+    angles are zeroed and ``curvature_visible`` is False. ``bar_xy`` is an optional detected barbell centre (px).
     """
-    pose = extract_side_pose(lm, side)
+    pose = extract_side_pose(lm, side, facing=facing)          # needs shoulder, hip, knee, ankle only
     if pose is None:
         return None
     sh, hip, knee, ankle = pose["shoulder"], pose["hip"], pose["knee"], pose["ankle"]
-    heel, toe = pose["heel"], pose["foot"]
+    feet_visible = pose.has("heel") and pose.has("foot")
+    side_on = view == "side"
 
     hip_deg = joint_angle(sh, hip, knee)
     knee_deg = joint_angle(hip, knee, ankle)
     trunk = inclination_from_vertical(hip, sh, pose.facing)
     tibia = inclination_from_vertical(ankle, knee, pose.facing)
     torso = distance(hip, sh)
-    foot = distance(heel, toe)
+    foot = distance(pose["heel"], pose["foot"]) if feet_visible else 0.5 * torso      # typical foot/torso ratio
     if not all(math.isfinite(v) for v in (hip_deg, knee_deg, trunk, tibia)) or torso < 1e-6:
         return None
 
@@ -78,7 +96,25 @@ def compute_deadlift_angles(lm: np.ndarray, t_s: float, side: Optional[str] = No
     # (both read < 180), which would make the segmenter see a false descent at a hyperextended lockout.
     hip_signed = 180.0 + wrap_deg(inclination_from_vertical(hip, knee, pose.facing) - trunk - 180.0)
 
-    spine = build_spine_proxy(pose)
+    angle_source = "image"
+    if not side_on and world is not None:
+        a3 = compute_angles_3d(world, lm[:, 2])
+        if a3 is not None:
+            hip_deg, hip_signed, knee_deg = a3.hip_deg, a3.hip_signed_deg, a3.knee_deg
+            trunk, tibia = a3.trunk_incl_deg, a3.tibia_incl_deg
+            angle_source = "world"
+
+    # --- spine: detected points if given, else the geometric proxy (side) or a straight midline (not side-on)
+    spine: Optional[SpineProxy]
+    if spine_points is not None:
+        pts = np.asarray(spine_points, float)
+        scores = pts[:, 2] if pts.shape[1] > 2 else spine_scores
+        spine = build_spine_from_points(pts[:, :2], pose.facing, scores, curvature_visible=side_on, source=spine_source)
+    elif side_on:
+        spine = build_spine_proxy(pose)
+    else:
+        mid = extract_midline_pose(lm, pose.facing)
+        spine = build_spine_proxy(mid, straight=True) if mid is not None else None
 
     bar, source = None, None
     if bar_xy is not None and np.all(np.isfinite(bar_xy)):
@@ -88,19 +124,23 @@ def compute_deadlift_angles(lm: np.ndarray, t_s: float, side: Optional[str] = No
 
     bar_height = bar_drift = None
     if bar is not None:
-        floor_y = max(float(heel[1]), float(toe[1]))
+        if feet_visible:
+            floor_y = max(float(pose["heel"][1]), float(pose["foot"][1]))
+        else:                                               # estimate the floor just below the ankle
+            floor_y = float(ankle[1]) + 0.12 * torso
         bar_height = (floor_y - float(bar[1])) / torso
-        mid_foot_x = 0.5 * (float(heel[0]) + float(toe[0]))
-        ref = foot if foot > 1e-6 else torso * 0.4          # fall back to a typical foot/torso ratio
-        bar_drift = (float(bar[0]) - mid_foot_x) * pose.facing / ref
+        if feet_visible and side_on:                        # drift needs the real mid-foot AND a side view
+            mid_foot_x = 0.5 * (float(pose["heel"][0]) + float(pose["foot"][0]))
+            ref = foot if foot > 1e-6 else torso * 0.4
+            bar_drift = (float(bar[0]) - mid_foot_x) * pose.facing / ref
 
     return DeadliftAngles(
         t_s=t_s, side=pose.side, facing=pose.facing, hip_deg=hip_deg, hip_signed_deg=hip_signed,
-        knee_deg=knee_deg,
-        knee_flexion_deg=180.0 - knee_deg, trunk_incl_deg=trunk, tibia_incl_deg=tibia,
+        knee_deg=knee_deg, knee_flexion_deg=180.0 - knee_deg, trunk_incl_deg=trunk, tibia_incl_deg=tibia,
         trunk_tibia_deg=trunk - tibia, torso_len_px=torso, foot_len_px=foot, spine=spine,
         bar_xy=None if bar is None else np.asarray(bar, float), bar_source=source,
-        bar_height_torso=bar_height, bar_drift_foot=bar_drift, pose=pose)
+        bar_height_torso=bar_height, bar_drift_foot=bar_drift, pose=pose, feet_visible=feet_visible,
+        view="side" if side_on else "angled", angle_source=angle_source)
 
 
 # ---------------------------------------------------------------------------

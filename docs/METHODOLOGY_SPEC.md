@@ -4,7 +4,7 @@ _Status: governing spec, v1.0 (2026-11-15). Every method below cites its source.
 
 **Citation keys**
 
-| Key | Paper (PDF in `docs/Research Papers/`) |
+| Key | Paper (PDF in `docs/resarchpapers/`) |
 |---|---|
 | **[P1]** | Khan, Krauß, Stricker — *Towards Unconstrained 2D Pose Estimation of the Human Spine* (SpineTrack / SpinePose), arXiv:2504.08110v1 — `2504.08110v1.pdf` |
 | **[P2]** | Chiquier, Vondrick — *Muscles in Action* (MIA), arXiv:2212.02978v3 — `2212.02978v3.pdf` |
@@ -87,6 +87,8 @@ Learning problems:
 | Mid thoracic | T3, T8, L1 | thoracic kyphosis proxy |
 | Lumbar | L1, L3, L5 | lumbar lordosis/flexion proxy |
 | Sacral / lumbopelvic | L5, SACRUM (+ MediaPipe hip centre) | pelvic tilt proxy, "butt wink" |
+
+**Implementation status (2026-11-18):** `vision/spine_model.py` + `build_spine_from_points` implement this inference path (G-31); installed/run status is recorded there.
 
 **Inference path (default):** run a released **SpinePose** checkpoint (RTMPose family, top-down, input 256×192) on the YOLO person crop. Then fuse with MediaPipe through the bridge in [G-01].
 
@@ -256,7 +258,7 @@ $E(x)=f_{\theta_2}(g_{\theta_1}(x))$.
    - MVC absolute amplitude (log, per muscle, M), for sensor/skin variance [P3 intro: electrode placement, skin, fat]
 2. **Concat-then-project:** $[d_t;y_t]\in\mathbb{R}^{128+C_{cond}}\to\mathbb{R}^{128}$ via a linear `cond_proj`. Initialise it so the 128 base columns are the identity and the conditioning columns are **zero**, so a freshly created Tier-2 model reproduces Tier 1 exactly [G-09].
 3. **Fine-tuning protocol [P3]:** initialise from Global weights. **Freeze everything except the last layer** (FC head) **plus `cond_proj`**. Ablation: first layer ($g_{\theta_1}$) only. [P3] found first-only ≈ last-only ≈ all-layers. Train on the **1–5 calibration reps** with **early stopping on a 10% validation split** of calibration windows (min. 1 window) [P3 §Approach]. Keep the hyperparameters of global training [P3].
-4. After calibration the sensors come off. Runtime = $E_\theta(x;\,y_{athlete})$, camera only.
+4. After calibration the sensors come off. Runtime = $E_\theta(x;\,y_{athlete})$, sensor-free (camera or uploaded video).
 
 Expected effect sizes (for planning, not guaranteed for regression): [P3] +5 points vs un-fine-tuned and +12 vs subject-specific, 22% fewer epochs. Gains shrink quickly with fewer reps, and raw-input models can **degrade** with 1 rep [P3 Table 3]. So Tier 2 must be gated: deploy the personalised head only if its held-out-rep RMSE beats Tier 1 on that athlete's held-out calibration rep.
 

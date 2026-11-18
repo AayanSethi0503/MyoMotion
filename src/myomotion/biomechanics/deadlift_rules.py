@@ -70,6 +70,20 @@ class DeadliftRuleConfig:
     lumbar_enter_deg: float = 4.0
     lumbar_exit_deg: float = 2.5
     lumbar_dwell_s: float = 0.25
+    # Same rule with the real detected spine (SpinePose, G-31): keypoint noise of a few px gives a few degrees of
+    # jitter in a region angle, and a rounded back moves it by tens of degrees, so the thresholds are larger.
+    lumbar_enter_deg_model: float = 12.0
+    lumbar_exit_deg_model: float = 8.0
+    # Back-silhouette spine (G-32): noisier than a trained keypoint model (polynomial fit to a mask edge, clothing,
+    # the gluteal bulge), so more conservative. On a real 39 s recording (4 reps) its lumbar change stayed under
+    # 15 deg for any sustained period, so no false warnings; sensitivity to genuine rounding is NOT validated.
+    lumbar_enter_deg_contour: float = 15.0
+    lumbar_exit_deg_contour: float = 10.0
+    # False = the geometric PROXY spine is shown but raises no back-rounding warning. On real webcam footage the proxy
+    # flagged "rounding" on every rep, including while the lifter stood upright (it only sees head position relative to
+    # the trunk line, G-24). Cues from detected SpinePose points are unaffected. The library default stays True so the
+    # proxy rule logic stays testable; the demo CLI turns it off unless --proxy-spine-cues is given.
+    proxy_spine_cues: bool = True
     pull_init_window_s: float = 1.0          # rounding is checked at the bottom and for this long after lift-off
     baseline_per_setup: bool = False         # False: baseline = first stable set-up of the session
     # --- Hips rising faster than shoulders (G-23): over the first window after lift-off
@@ -181,8 +195,11 @@ class DeadliftFormAnalyzer:
                                                     c.lockout_dwell_s),
             FormFlag.BAR_DRIFT: _Latch(c.bar_drift_enter_foot, c.bar_drift_exit_foot, c.bar_drift_dwell_s),
         }
+        self._lumbar_model = _Latch(c.lumbar_enter_deg_model, c.lumbar_exit_deg_model, c.lumbar_dwell_s)
+        self._lumbar_contour = _Latch(c.lumbar_enter_deg_contour, c.lumbar_exit_deg_contour, c.lumbar_dwell_s)
         self.baseline = SpineBaseline()
         self._baseline_locked = False
+        self._baseline_source: Optional[str] = None
         self._history: Deque[DeadliftAngles] = deque(maxlen=900)   # ~15 s at 60 fps, for lift-off look-ups
         self.events: List[FormEvent] = []
         self.rep_forms: List[RepForm] = []
@@ -235,12 +252,17 @@ class DeadliftFormAnalyzer:
             self._early_done = False
         self._prev_phase = phase
 
-        # ---- spine baseline (first stable set-up, or every set-up if configured)
-        if phase == Phase.SETUP and a.spine is not None and (not self._baseline_locked or c.baseline_per_setup):
-            self.baseline.add(a.spine)
+        # ---- spine baseline (first stable set-up, or every set-up if configured). Only a spine whose curvature is
+        # visible counts (not from the front/back), and a change of source (proxy <-> SpinePose) starts a new baseline.
+        spine = a.spine if (a.spine is not None and a.spine.curvature_visible) else None
+        if spine is not None and spine.source != self._baseline_source:
+            self.reset_baseline()
+            self._baseline_source = spine.source
+        if phase == Phase.SETUP and spine is not None and (not self._baseline_locked or c.baseline_per_setup):
+            self.baseline.add(spine)
         elif phase != Phase.SETUP and self.baseline.ready:
             self._baseline_locked = True
-        self.spine_delta = self.baseline.delta(a.spine) if a.spine is not None else None
+        self.spine_delta = self.baseline.delta(spine) if spine is not None else None
 
         # ---- 1. lumbar rounding / posterior pelvic tilt (proxy)
         since_liftoff = (t - liftoff_t) if liftoff_t is not None else math.inf
@@ -249,9 +271,21 @@ class DeadliftFormAnalyzer:
         lumbar = self.spine_delta.lumbar_deg if self.spine_delta is not None else None
         if lumbar is not None and rounding_phase:
             self._max_lumbar = lumbar if self._max_lumbar is None else max(self._max_lumbar, lumbar)
-        if self._latch[FormFlag.LUMBAR_ROUNDING].update(t, lumbar, rounding_phase):
-            ev = self._raise(FormFlag.LUMBAR_ROUNDING, t, phase, lumbar, c.lumbar_enter_deg,
-                             "Chest up: possible back rounding (proxy)", "proxy")
+        src = spine.source if spine is not None else "proxy"
+        latches = {"proxy": self._latch[FormFlag.LUMBAR_ROUNDING], "spinepose": self._lumbar_model,
+                   "contour": self._lumbar_contour}
+        latch = latches.get(src, latches["proxy"])
+        for other in latches.values():                      # only the latch of the current spine source runs
+            if other is not latch:
+                other.reset()
+        cue_allowed = src != "proxy" or c.proxy_spine_cues
+        enter = {"proxy": c.lumbar_enter_deg, "spinepose": c.lumbar_enter_deg_model,
+                 "contour": c.lumbar_enter_deg_contour}.get(src, c.lumbar_enter_deg)
+        msg = {"proxy": "Chest up: possible back rounding (proxy)", "spinepose": "Chest up: back rounding detected",
+               "contour": "Chest up: possible back rounding (back contour)"}.get(src, "Chest up: back rounding")
+        if latch.update(t, lumbar if cue_allowed else None, rounding_phase and cue_allowed):
+            ev = self._raise(FormFlag.LUMBAR_ROUNDING, t, phase, lumbar, enter, msg,
+                             {"proxy": "proxy", "spinepose": "direct", "contour": "contour"}.get(src, "proxy"))
             if ev:
                 new.append(ev)
 
@@ -302,10 +336,20 @@ class DeadliftFormAnalyzer:
         # Latch-based flags are active while their condition holds; "hips rise early" is a one-shot
         # verdict, shown for the rest of the pull/lockout/descent of the rep it occurred in.
         self.active = {f for f, l in self._latch.items() if l.active}
+        if self._lumbar_model.active or self._lumbar_contour.active:
+            self.active.add(FormFlag.LUMBAR_ROUNDING)
         if (FormFlag.HIPS_RISE_EARLY in self._rep_flags
                 and phase in (Phase.CONCENTRIC_PULL, Phase.LOCKOUT, Phase.ECCENTRIC_DESCENT)):
             self.active.add(FormFlag.HIPS_RISE_EARLY)
         return new
+
+    def reset_baseline(self) -> None:
+        """Forget the set-up reference (the body side changed, or the spine source changed)."""
+        self.baseline.reset()
+        self._baseline_locked = False
+        self._lumbar_model.reset()
+        self._lumbar_contour.reset()
+        self._latch[FormFlag.LUMBAR_ROUNDING].reset()
 
     def reset_attempt(self) -> None:
         """Discard the accumulators of an attempt that did not become a counted rep (STANDBY / failed pull)."""
@@ -314,6 +358,8 @@ class DeadliftFormAnalyzer:
         self._max_lumbar = self._min_lockout_trunk = self._max_drift = None
         for latch in self._latch.values():
             latch.reset()
+        self._lumbar_model.reset()
+        self._lumbar_contour.reset()
         self.active = set()
 
     # -- per rep --------------------------------------------------------------

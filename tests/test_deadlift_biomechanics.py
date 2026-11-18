@@ -617,7 +617,8 @@ def _load_demo():
 def test_demo_cli_writes_video_and_json(tmp_path, capsys):
     cv2 = pytest.importorskip("cv2")
     demo = _load_demo()
-    rc = demo.main(["--synthetic", "lumbar_round", "--reps", "1", "--no-display", "--out-dir", str(tmp_path)])
+    rc = demo.main(["--synthetic", "lumbar_round", "--reps", "1", "--no-display", "--proxy-spine-cues",
+                    "--out-dir", str(tmp_path)])
     assert rc == 0
     video = tmp_path / "synthetic_lumbar_round_annotated.mp4"
     summary = json.loads((tmp_path / "synthetic_lumbar_round_summary.json").read_text())
@@ -634,7 +635,7 @@ def test_demo_cli_rule_config_override(tmp_path):
     cfg = tmp_path / "cfg.json"
     cfg.write_text(json.dumps({"lumbar_enter_deg": 25.0, "lumbar_exit_deg": 20.0}))
     demo.main(["--synthetic", "lumbar_round", "--reps", "1", "--no-display", "--no-video", "--out-dir", str(tmp_path),
-               "--config", str(cfg)])
+               "--proxy-spine-cues", "--config", str(cfg)])
     summary = json.loads((tmp_path / "synthetic_lumbar_round_summary.json").read_text())
     assert summary["flag_counts"]["lumbar_rounding"] == 0 and summary["rule_config"]["lumbar_enter_deg"] == 25.0
 

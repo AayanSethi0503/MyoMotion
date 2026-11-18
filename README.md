@@ -64,7 +64,8 @@ pip install -r requirements.txt
 # Always run from the project root
 
 # Deadlift demo: pose + spine proxy + angles + rep phases + form cues. Writes output/*.mp4 and output/*.json
-python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4
+python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4              # uploaded video (validated first)
+python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4 --validate-only   # check the file only
 python scripts/demo_deadlift.py --source 0                  # live webcam
 python scripts/demo_deadlift.py --synthetic lumbar_round    # no camera or model needed
 
@@ -75,7 +76,10 @@ python scripts/cv/deadlift/deadlift_tracker.py
 python -m pytest tests -q
 ```
 
-Film from the **side**, full body in frame, camera about 2-3 m away. Press **Q** to quit a live window.
+Either body side, any heading (side-on is best; facing the camera works via a 3-D estimate), the spine is estimated from your back silhouette by default (side-on, no extra model; `docs/GAP_ANALYSIS.md` G-32), or from SpinePose (optional install, G-31).
+What the tracker needs to count a rep (camera, pose, joints): `docs/DEADLIFT_TRACKING_REQUIREMENTS.md`.
+Uploaded footage: `.mp4` / `.mov` / `.m4v` (H.264), 720p-1080p, 24-60 fps, side view, whole body in frame; full spec in `docs/VIDEO_INPUT_SPEC.md`.
+Filming: **side** view, full body in frame, camera about 2-3 m away. Press **Q** to quit a live window.
 Spine/back-rounding cues come from a geometric proxy and are labelled "(proxy)"; see `docs/GAP_ANALYSIS.md` (G-24).
 
 ## Tech Stack

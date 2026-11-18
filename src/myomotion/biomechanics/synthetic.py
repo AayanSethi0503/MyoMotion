@@ -204,3 +204,122 @@ def generate_clip(scenario: str | Scenario = "good", spec: ClipSpec = ClipSpec()
 
 def clip_list(scenario: str | Scenario = "good", spec: ClipSpec = ClipSpec()) -> List[Tuple[float, np.ndarray]]:
     return list(generate_clip(scenario, spec))
+
+
+# ---------------------------------------------------------------------------
+# 3-D lifter: any viewing angle, both sides, with MediaPipe-style world landmarks
+# ---------------------------------------------------------------------------
+M_PER_PX = 0.002                     # body model scale: 250 px torso = 0.5 m
+
+# lateral half-widths in metres (person's right is +)
+_LATERAL_M = dict(ear=0.08, shoulder=0.18, elbow=0.20, wrist=0.20, hip=0.09, knee=0.10, ankle=0.10,
+                  heel=0.10, foot=0.11)
+
+
+def build_landmarks_3d(p: JointPose, body: Body = Body(), yaw_deg: float = 0.0, cx: float = 640.0,
+                       floor_y: float = 700.0, spine_curve_deg: float = 0.0):
+    """Planar lifter turned about the vertical axis: returns ``(image [33, 3], world [33, 3])``.
+
+    ``yaw_deg`` is the person's heading seen from the camera: 0 = side-on facing image-right (right side to the
+    camera), 90 = facing the camera, 180 = side-on facing image-left (left side to the camera), -90 = back to the
+    camera. Image coordinates are an orthographic projection (px, y down); world coordinates follow MediaPipe's
+    convention (metres, origin at the hip centre, x right, y DOWN, z away from the camera).
+    Each side's visibility is 0.99 when it is the side closer to the camera (or equidistant), else 0.15.
+    ``spine_curve_deg`` is unused here (the planar body has no spine curvature of its own).
+    """
+    a = math.radians(yaw_deg)
+    fx, fz = math.cos(a), -math.sin(a)                  # forward in the camera's horizontal plane (x right, z away)
+    rx, rz = -math.sin(a), -math.cos(a)                 # the person's right-hand direction
+
+    def vec(incl_deg: float, length: float):            # (forward u, up h) in px
+        t = math.radians(incl_deg)
+        return math.sin(t) * length, math.cos(t) * length
+
+    ankle = (0.0, body.ankle_h)
+    du, dh = vec(p.shank_incl_deg, body.shank)
+    knee = (ankle[0] + du, ankle[1] + dh)
+    du, dh = vec(p.shank_incl_deg - p.knee_flex_deg, body.thigh)
+    hip = (knee[0] + du, knee[1] + dh)
+    du, dh = vec(p.trunk_incl_deg, body.torso)
+    shoulder = (hip[0] + du, hip[1] + dh)
+    du, dh = vec(p.trunk_incl_deg + p.bend_deg, body.neck)
+    ear = (shoulder[0] + du, shoulder[1] + dh)
+    heel = (-0.25 * body.foot, 0.0)
+    toe = (0.75 * body.foot, 0.0)
+    wrist = (0.25 * body.foot + p.bar_drift_foot * body.foot, shoulder[1] - body.arm)
+    elbow = (0.5 * (shoulder[0] + wrist[0]), 0.5 * (shoulder[1] + wrist[1]))
+    nose = (ear[0] + 0.09 / M_PER_PX, ear[1] - 0.03 / M_PER_PX)
+    chain = dict(ear=ear, shoulder=shoulder, elbow=elbow, wrist=wrist, hip=hip, knee=knee, ankle=ankle,
+                 heel=heel, foot=toe)
+
+    def cam(point, lateral_m):
+        u, h = point
+        return (u * M_PER_PX * fx + lateral_m * rx, h * M_PER_PX, u * M_PER_PX * fz + lateral_m * rz)
+
+    img = np.zeros((NUM_LANDMARKS, 3))
+    world = np.zeros((NUM_LANDMARKS, 3))
+    hip_c = cam(hip, 0.0)
+    for key, pt in chain.items():
+        pr, pl = cam(pt, +_LATERAL_M[key]), cam(pt, -_LATERAL_M[key])
+        for side, c, other in (("right", pr, pl), ("left", pl, pr)):
+            idx = SIDE_INDICES[side][key]
+            vis = 0.99 if c[2] <= other[2] + 0.02 else 0.15
+            img[idx] = (cx + c[0] / M_PER_PX, floor_y - c[1] / M_PER_PX, vis)
+            world[idx] = (c[0] - hip_c[0], -(c[1] - hip_c[1]), c[2] - hip_c[2])
+    n = cam(nose, 0.0)
+    img[NOSE] = (cx + n[0] / M_PER_PX, floor_y - n[1] / M_PER_PX, 0.95)
+    world[NOSE] = (n[0] - hip_c[0], -(n[1] - hip_c[1]), n[2] - hip_c[2])
+    return img, world
+
+
+def generate_clip_3d(scenario: str | Scenario = "good", spec: ClipSpec = ClipSpec(), body: Body = Body(),
+                     yaw_deg: float = 0.0, world_noise_m: float = 0.0, cx: float = 640.0, floor_y: float = 700.0):
+    """Yield ``(t_s, image [33, 3], world [33, 3])`` for the whole clip, seen from heading ``yaw_deg``."""
+    sc = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
+    rng = random.Random(spec.seed)
+    n = int(round(clip_duration(spec) * spec.fps))
+    for i in range(n):
+        t = i / spec.fps
+        s, asc = progress_at(t, spec)
+        img, world = build_landmarks_3d(deadlift_pose(s, sc, asc), body, yaw_deg, cx, floor_y)
+        if spec.noise_px > 0:
+            img[:, 0] += [rng.gauss(0.0, spec.noise_px) for _ in range(NUM_LANDMARKS)]
+            img[:, 1] += [rng.gauss(0.0, spec.noise_px) for _ in range(NUM_LANDMARKS)]
+        if world_noise_m > 0:
+            world += np.array([[rng.gauss(0.0, world_noise_m) for _ in range(3)] for _ in range(NUM_LANDMARKS)])
+        yield t, img, world
+
+
+def back_profile_for(pose: JointPose, neutral_bend_deg: float = 5.0, base: float = 0.20):
+    """Back-surface distance behind the hip-shoulder chord (torso lengths) as a function of the position ``t`` along it.
+
+    A neutral back sits ``base`` behind the chord with a gentle upper-back bulge. Rounding (extra head/upper-back bend)
+    adds a convex lower-thoracic/lumbar bulge that grows with the amount of rounding; used to build test silhouettes.
+    """
+    rounding = max(0.0, (pose.bend_deg - neutral_bend_deg) / 28.0)
+
+    def profile(t: float) -> float:
+        bulge = math.exp(-((t - 0.38) / 0.30) ** 2)           # lower-thoracic / lumbar region
+        return base + (0.03 + 0.17 * rounding) * bulge
+    return profile
+
+
+def generate_clip_3d_masked(scenario: str | Scenario = "good", spec: ClipSpec = ClipSpec(), body: Body = Body(),
+                            yaw_deg: float = 0.0, shape=(720, 1280), cx: float = 640.0, floor_y: float = 700.0,
+                            world_noise_m: float = 0.0):
+    """Like :func:`generate_clip_3d` but also yields a person silhouette: ``(t_s, image, world, mask [H, W])``.
+
+    The silhouette is a trunk polygon whose back edge follows :func:`back_profile_for` (side-on views only are
+    meaningful), so the back-contour spine can be tested end to end without a camera.
+    """
+    from .spine_contour import synthetic_mask
+    sc = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
+    for t, img, world in generate_clip_3d(scenario, spec, body, yaw_deg, world_noise_m, cx, floor_y):
+        s, asc = progress_at(t, spec)
+        pose = deadlift_pose(s, sc, asc)
+        side = "right" if img[SIDE_INDICES["right"]["hip"], 2] >= img[SIDE_INDICES["left"]["hip"], 2] else "left"
+        idx = SIDE_INDICES[side]
+        hip, sh = img[idx["hip"], :2], img[idx["shoulder"], :2]
+        facing = 1 if img[idx["foot"], 0] > img[idx["heel"], 0] else -1
+        mask = synthetic_mask(shape, hip, sh, facing, back_profile_for(pose, sc.neutral_bend_deg))
+        yield t, img, world, mask

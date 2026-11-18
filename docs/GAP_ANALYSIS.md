@@ -39,7 +39,12 @@ Status: **Decided** = implement as written. **Provisional** = implement behind a
 | G-25 | Applying [P8]'s squat trunk–tibia thresholds to the deadlift | Provisional |
 | G-26 | Rep segmentation: legacy state machine kept, bar half-cycle detector added, `REP_COMPLETE` phase | Decided |
 | G-27 | Signed hip angle (> 180 deg) so a hyperextended lockout is not read as a descent | Decided |
-| D-01 | Tier 2 sensors on the end user vs camera-only released app | **Resolved 2026-11-15** |
+| G-28 | Uploaded-video acceptance limits and timestamping | Provisional |
+| G-29 | Core vs optional joints, framing guidance, facing vote, low-fps velocity rescue | Provisional |
+| G-30 | Both body sides, any heading: dynamic side, 3-D world-landmark angles, view hysteresis | Provisional |
+| G-31 | Real spine: SpinePose keypoints as the spine source (optional dependency, CC-BY-NC) | **Optional; install not approved; not run on real footage** |
+| G-32 | Spine from the back silhouette (MediaPipe mask): the default now, no extra network | Provisional; checked on one real recording only |
+| D-01 | Tier 2 sensors on the end user vs sensor-free released app | **Resolved 2026-11-15, wording corrected 2026-11-18** |
 | D-02…D-04 | Product decisions that conflict between the brief and `Context.md` | **Open** |
 
 ---
@@ -219,6 +224,65 @@ Status: **Decided** = implement as written. **Provisional** = implement behind a
 
 ---
 
+## G-30 — Both body sides and any heading (second live-webcam report)
+
+- **Gap.** (1) The body side was locked on the first valid frame, so as soon as the lifter's left side faced the camera (or they turned around) every frame used the occluded far side: 0 of 189 frames got angles in a reproduction. (2) The 2-D side-view maths assumes the person is exactly side-on; real footage of this lifter was ~38° off side-on (heel-to-toe direction measured from the 3-D landmarks), and facing the camera foreshortens the hip hinge completely. (3) The proxy spine used one side's ear/shoulder/hip, which in a front view sits off the body's centre line and draws a bent line.
+- **Solution.**
+  - `DeadliftAnalyzer._update_side`: side re-chosen every frame; the other side takes over only if it is clearly more visible (> 0.15) for 0.4 s; both-equal (front view) never switches; a user-forced `--side` is fixed. A switch resets the facing vote and the spine baseline.
+  - `_vote_facing`: decaying weighted vote (toe-heel 3, nose-ear 2, knee-ankle 1, 3-D forward 4); follows a turn within ~1 s.
+  - `pose3d.py`: MediaPipe `pose_world_landmarks` (metres, y down) give view-independent midline hip/knee/trunk/tibia angles. Up = -y (verified on real frames); forward from the hip axis with the sign from foot/nose/knee cues. Used only when the person is not side-on.
+  - View = "side" (exact 2-D angles, the validated path) or "angled" (3-D), chosen from the 3-D hip-axis heading (works when the far shoulder is not visible), with hysteresis (enter ~25° off side-on, leave ~18°).
+  - Spine from a non-side view: straight midline through mid-ear / mid-shoulder / mid-hip, `curvature_visible=False`, no rounding rules (curvature cannot be seen from the front).
+  - Bar drift is disabled when not side-on.
+- **Limits.** The depth in world landmarks is a model estimate: lower accuracy than a clean 2-D side view. Assumes a level camera. Checked on real footage only for the trunk angle (4 frames, within ~3-4° of 2-D). Thresholds provisional.
+- **Tests.** `tests/test_views_and_spine.py` (3-D lifter from every heading incl. left side, facing, away, turning around mid-set).
+
+## G-32 — Spine from the back silhouette (no extra network; the mobile-friendly default)
+
+- **Why not just the papers' method.** Of the eight papers only P1, P8 and P5 (plus the supporting X1/X2) discuss the spine at all; P2, P3, P4, P6, P7 do not mention it. None gives a spine estimator that avoids a trained model or image evidence: **P1** offers the heuristic that failed here, plus the trained SpinePose (teacher-student); **X2 (OpenCap)** states that "keypoints at the hips and shoulders are insufficient for robustly determining sagittal-plane hip, pelvis, and lumbar kinematics" and fixes it with an LSTM marker augmenter trained on motion-capture data (needs 3-D triangulated input and mocap data we do not have); **P5 (Fitness-AQA)** finds image features beat 2-D pose features for the lumbar error (F1 0.61-0.63 vs 0.54, Table 5); **P8** gives the mechanics (forward trunk lean = hip flexion or lumbar flexion) but pelvic orientation is not observable from landmarks. So an *image-based* signal is needed. A learned landmark-to-spine model (the X2/P1 route) is the right long-term path but needs labelled data; see the roadmap below.
+- **Gap.** A spine estimate that lies on a curved back, runs on a phone, and needs no non-commercial model.
+- **Solution (external method, logged here per rule 2).** `biomechanics/spine_contour.py`: MediaPipe's person **segmentation mask** (same model, `output_segmentation_masks`) -> back-surface profile by ray-casting from the hip-shoulder axis toward the back -> robust quartic fit -> spine = back surface moved forward by a soft-tissue depth, between the S1 and C7 levels, nine labels at the vertebral-count fractions (G-24) -> `build_spine_from_points(..., source="contour")`. The principle (back-surface curvature approximates spinal curvature) is standard in surface topography (flexicurve, rasterstereography); it is not from P1-P8.
+- **Found on the user's real recording (586 frames, 1080p):** the old proxy's line ran through the front of the torso (the joint centres are not on the spine) and bowed on an upright back; the contour lies on the back edge, is straight when upright, and its lumbar change relative to set-up goes toward extension at lockout (-12 to -22 deg) and returns to ~0 on descent, which is the expected deadlift trajectory. Fit quartic over cubic: lowest jitter (lumbar 2.29 deg vs 2.60), highest confidence (0.87 vs 0.82); the cubic's +18 deg lumbar spike was an overshoot (+8 with quartic). No false rounding cues in the 4 reps (the proxy raised 5).
+- **Cost (measured, laptop CPU, 1080p):** mask +2.1 ms/frame on MediaPipe heavy (12.2 -> 14.4 ms), contour maths 0.71 ms/frame. No second network, no new dependency.
+- **Limits.** Side-on only (from the front there is no sagittal back edge). Loose clothing hides the true back surface (the recorded lifter wears a loose kurta). The lowest ~0.2 of the trunk is the gluteal bulge, so **lumbar curvature is the least reliable region**. The soft-tissue depth (0.065 torso), S1/C7 levels (0.08 / 1.06) and the 15/10 deg cue thresholds are provisional. **Not validated against markers or SpinePose.** Cervical points are a smooth continuation to the ear, not measured.
+- **Status of cues.** Contour-based rounding warnings are on, with conservative thresholds (15 / 10 deg) and the message "possible back rounding (back contour)". Region angles are baseline-relative as before.
+- **SpinePose vs this method (decision aid).**
+  | | Back contour (G-32) | SpinePose (G-31) | Proxy (G-24) |
+  |---|---|---|---|
+  | follows a curved spine | yes, side-on, from the silhouette | yes, trained on spine labels, any view | no |
+  | extra network | none | yes (P1 Table 1: -s 5.98 M params / 0.72 GFLOPs, -m 14.3 M / 1.98, -l 28.7 M / 4.22) | none |
+  | measured cost here | ~3 ms/frame | not measured (not installed) | ~0 |
+  | loose clothing | hurts | handled by training (unverified here) | n/a |
+  | views | side-on only | any | n/a |
+  | licence | none | **CC-BY-NC-4.0** (non-commercial) | none |
+  | status | checked on 1 real recording | integrated, **never run** | known to fail |
+  **Recommendation:** ship the contour as the phone baseline now. Use SpinePose only **offline, on a PC, as a reference to measure the contour's error** (research use; allowed by the licence) and as the teacher for the roadmap below. Move SpinePose on-device only if that measurement shows the contour is not good enough *and* the licence is cleared; if it is, SpinePose-s every 3rd frame next to MediaPipe lite/full is the realistic phone configuration.
+- **Roadmap (P1 teacher-student + X2 augmenter, mobile).** (1) Record a labelled set of side-view lifts (set-up, pull, lockout, and deliberately rounded reps, different clothing). (2) Offline, run SpinePose as the teacher to produce spine labels on those frames; compare the contour's angles against them (this gives the first real error numbers). (3) Train a tiny sequence model (GRU/LSTM, ~100 k parameters) mapping MediaPipe landmarks (+ contour features) to the teacher's spine points, as OpenCap's augmenter does from keypoints; it runs in microseconds on a phone. Needs consent for the footage and the licence question answered first.
+
+## G-31 — Real spine from SpinePose keypoints
+
+- **Gap.** The proxy cannot follow a curved spine (G-24); the user confirmed on real footage that its points do not lie on the spine. Only an image-based model can. Planned since G-01.
+- **Solution.** `vision/spine_model.py` runs the SpinePose pose network ([P1]; RTMPose, SimCC decode) on a person box derived from MediaPipe's landmarks (the package's own detector is never run), returns nine points in `SPINE_LABELS` order, and the pipeline replaces the proxy (`build_spine_from_points`: region angles from the real points, flexion positive, Catmull-Rom curve through every point). G-01 consistency check: SpinePose and MediaPipe shoulder/hip mid-points must agree within 0.35 torso lengths, else the detection is dropped for that frame. The package's v1 `_smooth_spine` (midpoint of neighbours) is bypassed because it flattens curvature. Rounding thresholds for real points are separate (`lumbar_enter_deg_model` 12 deg / exit 8, provisional).
+- **Install (optional; NOT done, awaiting user approval):** `pip install onnxruntime tqdm OneEuroFilter && pip install --no-deps spinepose==2.1.0`. `torch` (a declared but unused dependency) is not needed. Model weights (ONNX) download on first use from Hugging Face `dfki-av/spinepose`.
+- **Licence: CC-BY-NC-4.0 (non-commercial).** Acceptable for the FYP; a blocker for a commercial release. Confirm with the supervisor.
+- **Chain-order mapping** `SACRUM, L5, L3, L1, T8, T3, C7, C4, C1` is our reading of the package's `SPINE_IDS` chain order plus the vertebra counts of [P1 Fig. 2]; sanity-checked by an ordering test on the points.
+- **Status.** Unit-tested with a stand-in model only. **Not yet run on the real network or real footage.** The first run must be checked by eye.
+- **Cost.** Extra ONNX inference per frame (small model about 6 M parameters). `--spine-every N` reuses the last detection between runs.
+
+## G-29 — Partial visibility, framing guidance and low frame rate (found in the first live-webcam test)
+
+- **Gap.** The first webcam run drew no skeleton and counted no rep. Two causes, both mine: (1) `extract_side_pose` required ear, heel and toe as well as shoulder/hip/knee/ankle, so any one out of frame discarded the whole frame (no skeleton, no reps, no explanation); (2) the velocity estimator needed 4 samples in 0.4 s, so below ~8 fps (the heavy pose model on a laptop CPU) the state machine never advanced.
+- **Solution.** `landmarks.py`: CORE joints (shoulder, hip, knee, ankle) are required; ear, heel, toe, wrist are optional and switch off only their own feature (spine proxy / facing / bar path). `framing_report` explains what blocks tracking (missing core joint, facing the camera, too small in frame). `estimate_facing` falls back toe-heel (weight 3) → nose-ear (2) → knee-ankle (1) and `DeadliftAnalyzer` locks facing by a weighted vote. Bar drift is disabled without a visible heel+toe rather than guessed. `FrameResult` always carries the raw landmarks and a proxy spine (if ear/shoulder/hip are seen), so something is always drawn. `SlidingSlope(max_window_s=1.0)` stretches the velocity window back over the last 4 samples when the normal 0.4 s window is too sparse: identical at >= 10 fps, and reps are counted down to 4 fps in tests.
+- **Provisional thresholds.** Front-view warning when the shoulders are further apart than 0.55 x torso; "small" below 30% of frame height. Not validated on real footage.
+- **Tests.** `tests/test_tracking_robustness.py`. User-facing requirements: `docs/DEADLIFT_TRACKING_REQUIREMENTS.md`.
+
+## G-28 — Uploaded-video acceptance and timestamping
+
+- **Gap.** Context.md §1 requires uploaded video (offline batch), SRS FR-CV-001 requires frame validation, and Context.md §6 lists "Validate Video" and "enough valid frames?" steps. No paper specifies input limits.
+- **Solution.** `vision/video_input.py`: `validate_video` returns accept / warn / reject with reasons (type, size, decodability, fps, duration, resolution); `iter_video_frames` yields `(t_s, frame)` using the container's timestamp for each frame (right for variable-frame-rate phone video), falling back to `index / fps`, and always strictly increasing; `assess_tracking` warns after analysis when too few frames had a person or no rep was found. The limits are in `VideoLimits` and documented in `docs/VIDEO_INPUT_SPEC.md`.
+- **Provisional.** The numeric limits are product choices. Verified: mp4/mov/m4v/avi/mkv/webm with H.264 and MPEG-4 decode with exact timestamps. **Not verified:** HEVC, rotation-metadata (portrait phone) files.
+- **Tests.** `tests/test_video_input.py`.
+
 ## G-27 — Signed hip angle
 
 - **Gap.** The interior shoulder-hip-knee angle is capped at 180 deg and reads *less* than 180 when the trunk leans **back** past the hip-knee line, exactly as it does for flexion. Fed to the segmenter, a hyperextended lockout looked like the hip closing: a false descent, and LOCKOUT was never entered. Found by running the synthetic scenarios, not by the papers.
@@ -227,7 +291,7 @@ Status: **Decided** = implement as written. **Provisional** = implement behind a
 
 ## Resolved decisions
 
-**D-01 (resolved 2026-11-15, team instruction): the released app runs 100% camera-only.** This matches `Context.md` §1/§6.1 (one actor; no sensors in the use-case or deployment diagrams).
+**D-01 (resolved 2026-11-15, team instruction; wording corrected 2026-11-18): the released app is sensor-free.** *Correction:* the first wording said "100% camera-only", which wrongly implied live-camera-only. The app takes **live camera and uploaded video**; what it never uses is an sEMG or other body sensor. This matches `Context.md` §1/§6.1 (one actor; no sensors in the use-case or deployment diagrams).
 - sEMG hardware is used **strictly** during **dataset collection** and **FYP evaluation/validation**.
 - The Tier-2 athlete protocol (MVC → 1–5 calibration reps → freeze-all-but-head fine-tune, [P3]) is therefore a **research/evaluation experiment** run by the team on consenting test participants. It answers "does personalisation help?" and is reported in the thesis. It is **not** a released-app feature, and the app needs no sEMG UI, serial/BLE code or MVC screens.
 - `ROADMAP.md` Phase 5's "Hybrid Model (Hardware-Calibrated)" variant should be reworded as "research/evaluation variant" to match.
