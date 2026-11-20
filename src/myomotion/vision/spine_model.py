@@ -20,8 +20,10 @@ The nine points come in the package's chain order ``SPINE_IDS = [19, 26, 27, 28,
 order. It is sanity-checked at run time: ``build_spine_from_points`` rejects points that are not ordered along
 sacrum -> C1.
 
-NOT YET RUN against the real model (install not approved at the time of writing): the wrapper is unit-tested with a
-stand-in model only. First real-footage run must be checked by eye.
+Run against the real network (small and medium, on a laptop with CoreML: 4-10 ms per inference after a ~2 s warm-up).
+Scores are SimCC peak values and can exceed 1; they are clipped to [0, 1] wherever a confidence is needed.
+On side-on photos the lower points (SACRUM, L5, L3) sit only 5-25 px apart, which is why region angles are estimated
+from a smooth fit (spine_proxy.build_spine_from_points, G-33) and not from neighbouring points.
 """
 
 from __future__ import annotations
@@ -98,7 +100,7 @@ class SpinePoseTracker:
     """
 
     def __init__(self, size: str = "small", version: str = "v1", model: Optional[Any] = None,
-                 spine_ids: Sequence[int] = DEFAULT_SPINE_IDS):
+                 spine_ids: Sequence[int] = DEFAULT_SPINE_IDS, warm_up: bool = True):
         self._ids = tuple(spine_ids)
         if len(self._ids) != 9:
             raise ValueError("expected 9 spine keypoint ids")
@@ -115,6 +117,8 @@ class SpinePoseTracker:
                 url = url % _VERSION_TO_FAMILY[version]
             model = RTMPose(url, model_input_size=cfg["pose_input_size"])
             self._ids = tuple(SpinePoseEstimator.SPINE_IDS)
+            if warm_up:                          # the first call compiles the execution provider (~2 s on CoreML)
+                model(np.zeros((256, 192, 3), np.uint8), bboxes=[[0.0, 0.0, 191.0, 255.0]])
         self._model = model
 
     def detect(self, frame_bgr: np.ndarray, bbox_xyxy: np.ndarray) -> Optional[SpineDetection]:

@@ -13,6 +13,7 @@ Which joints are needed (docs/DEADLIFT_TRACKING_REQUIREMENTS.md):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -56,6 +57,9 @@ ANGLED_EXIT_SPAN_RATIO = 0.22        # angled -> side, ~18 deg (back to the 2-D 
 FRONT_SPAN_RATIO = 0.70              # reported as "front" (or back) rather than "angled"
 SIDE_SWITCH_MARGIN = 0.15            # the other body side must be this much more visible to take over
 SIDE_SWITCH_HOLD_S = 0.4             # ...for this long (a turn, not a flicker)
+# A trunk hinged at least this far from vertical (0 upright, 90 horizontal) votes for the way the person faces: the
+# trunk leans toward the front of the body. Provisional (G-34); no paper gives a value.
+TRUNK_LEAN_FACING_DEG = 35.0
 # Body (shoulder -> ankle) shorter than this fraction of the image height = too far away / too small.
 MIN_BODY_HEIGHT_FRACTION = 0.30
 
@@ -157,6 +161,24 @@ def estimate_facing(lm: np.ndarray, side: str, min_visibility: float = MIN_LANDM
         return (1 if lm[NOSE, 0] > lm[idx["ear"], 0] else -1), 2
     if ok("knee", "ankle") and abs(lm[idx["knee"], 0] - lm[idx["ankle"], 0]) > 1e-6:
         return (1 if lm[idx["knee"], 0] > lm[idx["ankle"], 0] else -1), 1
+    return 0, 0
+
+
+def estimate_facing_from_trunk(lm: np.ndarray, side: str,
+                               min_visibility: float = MIN_LANDMARK_VISIBILITY) -> Tuple[int, int]:
+    """Facing direction from a hinged trunk: ``(direction, 3)``, or ``(0, 0)`` while the trunk is closer to upright
+    than ``TRUNK_LEAN_FACING_DEG`` (or shoulder/hip are not reliable).
+
+    A hinged trunk leans toward the front of the body. Unlike the other cues this needs neither the feet nor the face
+    (a bent-over head hangs, so nose-ear is unreliable exactly when the spine matters). [G-34]
+    """
+    idx = SIDE_INDICES[side]
+    if not all(landmark_reliable(lm[idx[k]], min_visibility=min_visibility) for k in ("shoulder", "hip")):
+        return 0, 0
+    dx = float(lm[idx["shoulder"], 0] - lm[idx["hip"], 0])
+    up = float(lm[idx["hip"], 1] - lm[idx["shoulder"], 1])              # > 0: shoulder above hip (image y is down)
+    if abs(dx) > 1e-6 and math.degrees(math.atan2(abs(dx), up)) >= TRUNK_LEAN_FACING_DEG:   # 0 upright, 90 flat
+        return (1 if dx > 0 else -1), 3
     return 0, 0
 
 

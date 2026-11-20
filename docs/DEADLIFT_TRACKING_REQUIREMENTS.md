@@ -11,7 +11,7 @@ Read this before filming or using the webcam. Every number here is a constant in
 | Requirement | Detail |
 |---|---|
 | **Heading** | **Side-on (90° to the camera) is best.** Either side (left or right to the camera) and either direction works, and the app follows you if you turn around. **Angled or facing the camera also works**: it then switches to a 3-D estimate (MediaPipe world landmarks), which is less exact, and **spine curvature cannot be seen** from the front or back, so there are no back-rounding cues in that view |
-| **Whole leg in frame, always** | The camera must see your **shoulder, hip, knee and ankle** (on the side facing it, or both sides when facing the camera) in **every frame**, including the bottom of the lift. Ideally the whole body, head to feet |
+| **Whole leg in frame, always** | To **count reps** and compute hip/knee angles the camera must see your **shoulder, hip, knee and ankle** (on the side facing it) in **every frame**, including the bottom of the lift. Ideally the whole body, head to feet. **If the legs are out of frame the back is still monitored** (shoulder, hip and the spine are enough, section 7), but no reps are counted |
 | **Distance** | Far enough for that. A laptop webcam needs roughly **3 m** (about 10 ft). Phone cameras: about 2–3 m. If the feet are cut off, step back |
 | **Camera position** | **Static** (tripod, shelf, stack of books). Around **hip height**, level, not tilted. No handheld, no zoom, no panning |
 | **One person** | Only one pose is tracked. Keep others out of the shot |
@@ -22,7 +22,8 @@ Read this before filming or using the webcam. Every number here is a constant in
 
 | Joint (the side facing the camera) | Needed? | If it is missing |
 |---|---|---|
-| shoulder, hip, knee, ankle | **Required** | tracking stops: `NOT TRACKING`, no reps. The screen says which one |
+| shoulder, hip | **Required for everything**, including the back monitor | nothing is analysed |
+| knee, ankle | **Required for reps and leg angles** | `BACK MONITOR` instead of `NOT TRACKING`: no reps, no hip/knee angles, but the back cue still runs. The screen says which joint is missing |
 | ear / head | optional | the spine proxy is off (SpinePose, if installed, does not need it). Reps still count |
 | heel + toe | optional | the bar-path check is off; facing direction is taken from other cues. Reps still count |
 | wrist | optional | bar-height and bar-drift tracking are off |
@@ -70,10 +71,13 @@ No particular speed is needed, but the transitions need short stable moments: **
 
 | You see | Meaning | Do this |
 |---|---|---|
-| `NOT TRACKING` + a red `MISSING ankle` etc. | a required joint is not visible | follow the advice line (usually: step back) |
+| `BACK MONITOR` + `Not tracking reps: legs out of frame` | knee or ankle not visible, so reps are not counted; the back is still analysed (trunk angle, spine regions, rounding cue) | step back ~3 m to count reps; for back feedback alone you can stay |
+| `NOT TRACKING` + a red `MISSING hip` etc. | shoulder or hip not visible | follow the advice line (usually: step back) |
+| `HINGED: back cue armed` | your trunk is >= 30 deg from vertical, so the back-rounding rule is active | n/a |
+| `BACK ROUNDING - chest up, shoulders back` | the upper/mid-back (thoracic) region of the SpinePose spine is convex (>= +6 deg) while hinged | lift the chest, pull the shoulders back |
 | `View: angled (3D estimate)` | you are not side-on, so angles come from the 3-D estimate | fine for counting; turn side-on for exact angles and spine feedback |
 | `Spine: curve not visible from this angle` | front/back view: curvature cannot be seen | turn side-on to get spine feedback |
-| `Spine (proxy: display only)` | no SpinePose installed: the spine curve is only geometry through ear/shoulder/hip and **cannot follow a real curved back** | install SpinePose (see `docs/GAP_ANALYSIS.md` G-31) |
+| `Spine (proxy: display only)` | the spine curve is only geometry through ear/shoulder/hip and **cannot follow a real curved back** (shown only with `--spine proxy`, or for a few frames when neither SpinePose nor the silhouette is available) | use the default (`--spine auto`); SpinePose install: `requirements-spine.txt` |
 | `You look small in the frame` | your body is under 30% of the frame height | move closer or zoom in |
 | `LOW FRAME RATE (n fps)` | the computer is too slow for reliable counting | close other apps, use a lighter pose model (`--model models/pose_landmarker_lite.task`) |
 | Bottom line: `START: hinge forward…` | waiting for stage 1 | fold forward to ≤ 130° and hold still |
@@ -88,10 +92,10 @@ A laptop webcam is a hard case: the lens is low and wide, so getting the whole b
 ## 7. The spine line: what it is and is not
 
 - **`(back contour)`** (cyan, the default): the spine is estimated from the **silhouette of your back** (MediaPipe's person mask), so the line follows a curved back. Needs a **side-on view**; loose or baggy clothing hides the true back surface and makes it less accurate; the lower back is the least reliable region. Warnings from it are conservative and labelled "possible". Not yet validated against markers.
-- **`(SpinePose)`**: nine points **detected from the image** by a trained model (optional install). Same behaviour, any view, more accurate in principle, but a second network and a non-commercial licence.
+- **`(SpinePose)`** (blue, used automatically when installed): nine points **detected from the image** by a trained model, used **only for the spine**; MediaPipe still tracks every other joint. Works from any view (from the front/back you get a vertical midline only, no curvature). Region angles (lumbar / thoracic / cervical) come from a smooth fit through the nine points; they under-read a true change by about 3x. **The back-rounding cue uses the thoracic (upper/mid-back) angle, absolute, only while your trunk is hinged**; the **lumbar angle is displayed but raises no cue by default** (it disagreed between SpinePose sizes and false-alarmed on neutral reps; `--lumbar-cues` turns it on). Default model size is `medium` (about 9 ms per frame on a laptop; not measured on a phone), with a non-commercial licence (D-05). Facing from the side is required for curvature: from the front there is no back-rounding cue.
 - **`(proxy)`** (magenta, `--spine proxy` only): a smooth curve through your ear, shoulder and hip. It has no information about the real spine between them, so it can look curved when you are straight and straight when you are curved. It is **display only**; warnings from it are off unless you pass `--proxy-spine-cues`.
 - **Front/back view**: a straight muted midline, labelled "curve not visible here".
 
 ## 8. Status
 
-The thresholds (130° / 160° / 8°/s and the dwell times) were chosen for the original tracker and are covered by synthetic tests only. They have **not** been validated on a labelled set of real lifts. The framing and view thresholds (angled view from ~25° off side-on, small-in-frame 30%) are provisional (G-29, G-30 in `docs/GAP_ANALYSIS.md`). The 3-D path was checked against real footage only for the trunk angle (within ~3-4° of the 2-D value on 4 frames); the back-contour spine was checked on one real recording only (no ground truth, no false alarms in 4 reps); the SpinePose path has **not** been run on real footage yet.
+The thresholds (130° / 160° / 8°/s and the dwell times) were chosen for the original tracker and are covered by synthetic tests only. They have **not** been validated on a labelled set of real lifts. The framing and view thresholds (angled view from ~25° off side-on, small-in-frame 30%) are provisional (G-29, G-30 in `docs/GAP_ANALYSIS.md`). The 3-D path was checked against real footage only for the trunk angle (within ~3-4° of the 2-D value on 4 frames); the back-contour spine was checked on one real recording only (no ground truth, no false alarms in 4 reps); the SpinePose path was run on that same recording (4 reps, no rounding cue, single-frame keypoint glitches of +35 and +79 deg were filtered out by the 0.25 s hold) but that recording has an old overlay drawn into it and **no ground truth exists**, so its accuracy is unknown. The SpinePose upper/mid-back cue (thoracic >= +6 deg while hinged) was calibrated **by eye on two recordings of one lifter** (about 25 neutral and 80-100 rounded frames) and is **not validated**; it can false-alarm on people with a naturally rounded upper back. See G-34 in `docs/GAP_ANALYSIS.md` for the evidence, the model-size comparison and what the papers do and do not provide. The per-frame spine angles are written to `<name>_spine.csv`, and `--save-raw` keeps the untouched camera frames, so a session can be re-analysed and the thresholds tuned on footage the team has labelled.

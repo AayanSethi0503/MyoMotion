@@ -66,7 +66,7 @@ pip install -r requirements.txt
 # Deadlift demo: pose + spine proxy + angles + rep phases + form cues. Writes output/*.mp4 and output/*.json
 python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4              # uploaded video (validated first)
 python scripts/demo_deadlift.py --source path/to/side_view_deadlift.mp4 --validate-only   # check the file only
-python scripts/demo_deadlift.py --source 0                  # live webcam
+python scripts/demo_deadlift.py --source 0                  # live webcam (add --save-raw to keep the untouched frames)
 python scripts/demo_deadlift.py --synthetic lumbar_round    # no camera or model needed
 
 # Legacy minimal tracker (hip/knee angles + phase only)
@@ -76,11 +76,18 @@ python scripts/cv/deadlift/deadlift_tracker.py
 python -m pytest tests -q
 ```
 
-Either body side, any heading (side-on is best; facing the camera works via a 3-D estimate), the spine is estimated from your back silhouette by default (side-on, no extra model; `docs/GAP_ANALYSIS.md` G-32), or from SpinePose (optional install, G-31).
+Either body side, any heading (side-on is best; facing the camera works via a 3-D estimate). MediaPipe tracks the body; the **spine** comes from SpinePose when it is installed (`--spine auto`, G-31, G-33) and otherwise from your back silhouette (side-on, no extra model, G-32). SpinePose is an optional, **non-commercially licensed** install:
+
+```bash
+pip install -r requirements-spine.txt
+pip install --no-deps spinepose==2.1.0   # weights download on first use to ~/.cache/spinepose
+python scripts/demo_deadlift.py --source path/to/video.mp4 --spine spinepose   # demand it (fails clearly if absent)
+```
+
 What the tracker needs to count a rep (camera, pose, joints): `docs/DEADLIFT_TRACKING_REQUIREMENTS.md`.
 Uploaded footage: `.mp4` / `.mov` / `.m4v` (H.264), 720p-1080p, 24-60 fps, side view, whole body in frame; full spec in `docs/VIDEO_INPUT_SPEC.md`.
 Filming: **side** view, full body in frame, camera about 2-3 m away. Press **Q** to quit a live window.
-Spine/back-rounding cues come from a geometric proxy and are labelled "(proxy)"; see `docs/GAP_ANALYSIS.md` (G-24).
+The back is monitored even when your legs are out of frame (no reps are counted then); the back-rounding cue reads the upper/mid-back angle of the SpinePose spine while you are hinged (`--lumbar-cues` adds the noisier lumbar cue). A per-frame spine log is written to `output/<name>_spine.csv`. None of the spine thresholds is validated against ground truth yet (G-33, G-34).
 
 ## Tech Stack
 

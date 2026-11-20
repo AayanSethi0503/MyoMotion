@@ -12,7 +12,10 @@ Spine: ``--spine auto`` (default) uses SpinePose (trained spine keypoints) when 
 person-mask silhouette of MediaPipe (no extra network, side view only, G-32). ``--spine proxy`` is the old geometric
 curve that cannot follow a real spine. SpinePose install: see myomotion/vision/spine_model.py (INSTALL_HINT).
 
-Writes ``<out-dir>/<name>_annotated.mp4`` and ``<out-dir>/<name>_summary.json``. Press Q in the window to stop.
+Writes ``<out-dir>/<name>_annotated.mp4``, ``<name>_summary.json`` and, when a spine was tracked, ``<name>_spine.csv``
+(per-frame region angles: the data for calibrating the back thresholds). ``--save-raw`` also keeps the untouched camera
+frames as ``<name>_raw.mp4`` so a session can be re-analysed later (the annotated video has the overlay burnt in, which
+disturbs the models). Press Q in the window to stop.
 Accepted upload format and filming guidance: docs/VIDEO_INPUT_SPEC.md (side view, whole body, one person, mp4/mov).
 Exit codes: 0 = ran, 2 = the uploaded video was rejected (reasons are printed).
 
@@ -67,25 +70,33 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="body side facing the camera (default: auto)")
     ap.add_argument("--no-display", action="store_true", help="do not open a window (headless / batch)")
     ap.add_argument("--no-video", action="store_true", help="do not write the annotated video")
+    ap.add_argument("--save-raw", action="store_true",
+                    help="also write the untouched input frames to <name>_raw.mp4 (live camera: lets the session be "
+                         "re-analysed offline without the overlay burnt in)")
     ap.add_argument("--max-seconds", type=float, default=None, help="stop after this many seconds of input")
     ap.add_argument("--config", default=None, help="JSON file overriding DeadliftRuleConfig fields")
     ap.add_argument("--spine", choices=["auto", "spinepose", "contour", "proxy"], default="auto",
                     help="spine source: SpinePose keypoints, the back silhouette contour (side view, no extra model), "
                          "or the geometric proxy that cannot follow a real curve (auto: SpinePose if installed, "
                          "else contour)")
-    ap.add_argument("--spine-size", choices=["small", "medium", "large"], default="small",
-                    help="SpinePose model size (small is fastest)")
+    ap.add_argument("--spine-size", choices=["small", "medium", "large"], default="medium",
+                    help="SpinePose model size. medium (default) separated rounded from neutral backs best and cost "
+                         "~2 ms more than small on a laptop; large was no better (G-34)")
     ap.add_argument("--spine-every", type=int, default=1, help="run SpinePose every N frames (reuse in between)")
     ap.add_argument("--proxy-spine-cues", action="store_true",
                     help="also raise back-rounding warnings from the geometric proxy spine (off by default: on real "
                          "footage it false-alarms; SpinePose cues are always on)")
+    ap.add_argument("--lumbar-cues", action="store_true",
+                    help="also raise the SpinePose LUMBAR back-rounding cues (off by default: lumbar flexion from 2-D "
+                         "keypoints disagreed between SpinePose sizes and false-alarmed on neutral reps, G-34; the "
+                         "lumbar angle is still shown). The upper/mid-back rounding cue is always on")
     ap.add_argument("--validate-only", action="store_true",
                     help="check an uploaded video against docs/VIDEO_INPUT_SPEC.md and exit (no analysis)")
     return ap.parse_args(argv)
 
 
-def load_rule_config(path: Optional[str], proxy_cues: bool = False) -> DeadliftRuleConfig:
-    cfg = DeadliftRuleConfig(proxy_spine_cues=proxy_cues)
+def load_rule_config(path: Optional[str], proxy_cues: bool = False, lumbar_cues: bool = False) -> DeadliftRuleConfig:
+    cfg = DeadliftRuleConfig(proxy_spine_cues=proxy_cues, lumbar_cues=lumbar_cues)
     if path:
         with open(path) as fh:
             overrides = json.load(fh)
@@ -198,9 +209,23 @@ def resolve_spine(args):
         return "contour", None
 
 
+def write_spine_csv(path: str, rows) -> None:
+    """Per-frame spine region angles (absolute, flexion positive) with the trunk angle and hinge state."""
+    import csv
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
-    cfg = load_rule_config(args.config, proxy_cues=args.proxy_spine_cues)
+    cfg = load_rule_config(args.config, proxy_cues=args.proxy_spine_cues, lumbar_cues=args.lumbar_cues)
+    validation = None
+    if args.source and not args.source.isdigit():               # an uploaded file: validate BEFORE loading any model
+        code, validation = check_upload(args.source)
+        if code or args.validate_only:
+            return code
     spine_mode, spine_tracker = resolve_spine(args)
     use_masks = spine_mode == "contour"
     if args.synthetic:
@@ -209,10 +234,7 @@ def main(argv=None) -> int:
     elif args.source.isdigit():
         frames, fps, stem = webcam_frames(args.source, args.model, masks=use_masks)
         source_desc, is_live = args.source, True
-    else:                                                    # an uploaded file: validate before doing any work
-        code, validation = check_upload(args.source)
-        if code or args.validate_only:
-            return code
+    else:
         upload_info = validation.info
         fps = upload_info.fps
         frames = uploaded_frames(args.source, fps, args.model, args.max_seconds, masks=use_masks)
@@ -225,12 +247,15 @@ def main(argv=None) -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     video_path = os.path.join(args.out_dir, f"{stem}_annotated.mp4")
     json_path = os.path.join(args.out_dir, f"{stem}_summary.json")
+    csv_path = os.path.join(args.out_dir, f"{stem}_spine.csv")
+    raw_path = os.path.join(args.out_dir, f"{stem}_raw.mp4")
 
     analyzer = DeadliftAnalyzer(rule_cfg=cfg, side=args.side)
     renderer = OverlayRenderer()
     spine_pts = None
     spine_bad = 0
     writer = None
+    raw_writer = None
     n = 0
     last_wall = time.perf_counter()
     last_problems: tuple = ()
@@ -266,8 +291,16 @@ def main(argv=None) -> int:
                 r = res.completed_rep
                 print(f"[REP ] #{r['rep_index']} pull {r['concentric_s']:.2f}s down {r['eccentric_s']:.2f}s "
                       f"tempo {r['tempo_ratio']:.2f} {r['form']['bias']} flags={r['form']['flags'] or 'none'}")
-            renderer.render(img, res, analyzer)
             h, w = img.shape[:2]
+            if args.save_raw:
+                if raw_writer is None:
+                    raw_writer = cv2.VideoWriter(raw_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+                    if not raw_writer.isOpened():
+                        print("[WARN] could not open a writer for the raw video; continuing without it")
+                        args.save_raw, raw_writer = False, None
+                if raw_writer is not None:
+                    raw_writer.write(img)
+            renderer.render(img, res, analyzer)
             if writer is None and not args.no_video:
                 writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
                 if not writer.isOpened():
@@ -285,6 +318,8 @@ def main(argv=None) -> int:
     finally:
         if writer is not None:
             writer.release()
+        if raw_writer is not None:
+            raw_writer.release()
         if spine_tracker is not None:
             spine_tracker.close()
         if not args.no_display:
@@ -309,12 +344,20 @@ def main(argv=None) -> int:
     summary = analyzer.summary(meta)
     with open(json_path, "w") as fh:
         json.dump(summary, fh, indent=2)
+    if analyzer.spine_log:
+        write_spine_csv(csv_path, analyzer.spine_log)
 
     print(f"\n[DONE] {summary['rep_count']} rep(s) in {summary['duration_s']:.1f}s "
-          f"({summary['frames_tracked']}/{summary['frames_total']} frames tracked)")
+          f"({summary['frames_tracked']}/{summary['frames_total']} frames fully tracked; "
+          f"back analysed in {summary['frames_back_monitored']} more with the legs out of view)")
+    print("       'fully tracked' = shoulder, hip, knee AND ankle all seen, which reps/angles/rules need.")
     raised = {k: v for k, v in summary["flag_counts"].items() if v}
     print(f"       flags: {raised or 'none'}")
     print(f"       summary: {json_path}")
+    if analyzer.spine_log:
+        print(f"       spine:   {csv_path}")
+    if args.save_raw and raw_writer is not None:
+        print(f"       raw:     {raw_path}")
     if not args.no_video:
         print(f"       video:   {video_path}")
     for w in quality:
