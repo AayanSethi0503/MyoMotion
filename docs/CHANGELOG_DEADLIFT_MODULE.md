@@ -699,3 +699,99 @@ Tests: 233 pass (excluding the 6 pre-existing pty tests): `tests/test_views_and_
 **Not validated:** accuracy against markers or SpinePose; clothing and lower-back (gluteal) limits; a genuinely rounded back was never in the footage, so cue sensitivity is unknown.
 
 Tests: 251 pass (excluding the 6 pre-existing pty tests): `tests/test_spine_contour.py` (new, 18).
+
+---
+
+# Addendum 5 (2026-11-20): SpinePose installed and integrated for the spine regions only
+
+**Request.** "Install and integrate SpinePose, ONLY for tracking the spinal regions (deadlifts, squats, bench press...). Leave MediaPipe for the rest of the body. ('Trigonometry' meant 'estimating the spinal features'.) The licence worry isn't a worry for now."
+
+**What was done first.** `pip install -r requirements-spine.txt` then `pip install --no-deps spinepose==2.1.0` into `.venv` (the package declares `torch`, `onnx`, `anytree` but never imports them); the installed set was diffed before and after. The real network was run on test photos and on the user's recording before any threshold was set.
+
+## What running the real network showed (and what changed because of it)
+
+| Finding | Consequence |
+|---|---|
+| The spine chain ids are `[19, 26, 27, 28, 29, 30, 18, 35, 36]` (hip, spine_01..05, neck, neck_02, neck_03); cumulative spacing along it matches the vertebral-count fractions | `DEFAULT_SPINE_IDS`, `CHAIN_BOTTOM_UP` in `vision/spine_model.py` |
+| Scores are SimCC peaks and reach 1.49 although documented as 0-1 | `build_spine_from_points`: `sc = np.clip(scores, 0, 1)` |
+| SACRUM, L5, L3 are only 5-25 px apart in a 224 px spine, so the direction-of-neighbouring-segments formula gave **-114 deg lumbar** on a real dumbbell-row chain; in simulation it false-alarmed on 56% of frames at 2 px noise | formula replaced (below, G-33) |
+| First call ~2.3 s, then 4-10 ms | `SpinePoseTracker(warm_up=True)` runs one dummy inference on construction |
+| The package's own `_smooth_spine` flattens curvature | bypassed: the tracker calls the RTMPose session directly and applies no smoothing of its own (`KeypointSmoother`, n = 9, does it later) |
+| Front-view photos: clean vertical midline | nothing invented: `curvature_visible=False` zeroes all angles |
+| Small and medium models disagreed on the lumbar angle of one photo (-10 vs +19 deg) | the lumbar cue stays conservative; all region angles are still displayed |
+
+## Code changes
+
+### `biomechanics/spine_proxy.py`: `build_spine_from_points` (G-33)
+Replaced. For the nine points in `SPINE_LABELS` order (C1 ... SACRUM):
+1. Validate: shape (9, 2), finite, mean clipped score >= `min_confidence` (0.25), SACRUM-C1 chord >= `MIN_SPINE_LENGTH_PX` (80 px).
+2. `up = pts[::-1]` (bottom to top), `chord`, `c_hat`, `along = (up - up[0]) @ c_hat` (position of each point along the chord).
+3. **Order check on trusted points only** (`trusted = score >= min_confidence`): fewer than 5 trusted points, or any backwards step of more than 2% of the chord among them, returns None. (Originally it checked all points, so one low-score wild point rejected the whole frame.)
+4. `a_hat`: unit vector to the front of the body, perpendicular to the chord. `anterior=None` means `(facing, 0)` (upright body facing image-left/right); pass `(0, -1)` for a supine bench press. Every direction is converted to an angle from the chord, positive toward `a_hat`, via `lean(v) = atan2(v . a_hat, v . c_hat)`, which makes the result independent of body orientation.
+5. Fit `x(t)`, `y(t)` as cubics (`REGION_FIT_DEGREE = 3`) with weights `clip(score, 0.05, 1)` and **`t = along / along[-1]`** (chord projection). Path-length parametrisation was tried first and rejected: one wild point at weight 0.05 and 60 px off moved the lumbar angle by ~165 deg; with the chord it moves it by ~1.1-1.6 deg.
+6. `tangent(i)` = derivative of the fit at `t[i]`; `lumbar = th[L1] - th[SACRUM]`, `thoracic = th[T3] - th[L1]`, `cervical = th[C1] - th[C7]` (all wrapped to +/-180), `pelvic` = tangent at SACRUM from vertical, `bend` from the two chords. The returned curve is a Catmull-Rom spline through the real points (not the fit), so the drawn line passes through every detected point.
+7. Cost of smoothing: a true change is under-read about 3.5x (true +30 deg reads ~+8.5).
+
+### `biomechanics/deadlift_rules.py`
+| Change | Detail |
+|---|---|
+| Thresholds | `lumbar_enter_deg_model` 12 -> **8**, `lumbar_exit_deg_model` 8 -> **5** (calibrated for the fit above; comment records the simulation and that nothing is validated on labelled lifts) |
+| Per-source baselines | `self._baselines: Dict[str, SpineBaseline]` and `self._baseline_locked: Dict[str, bool]` replace the single `baseline`/`_baseline_locked`/`_baseline_source`. A change of spine source no longer wipes the reference: on a real clip SpinePose missed a frame, the proxy took over for one frame, the baseline was reset, and reps 3 and 4 had no lumbar reading. `reset_baseline()` clears all sources (still called when the body side changes) |
+| `max_lumbar_delta_deg` | now accumulates only frames whose source may raise a cue (`cue_allowed`), and is the largest value **held** for `lumbar_dwell_s`: a deque `_lumbar_recent` of `(t_s, delta)` over the last 0.25 s, and `held = min(values)` once the window spans >= 0.2 s. Single-frame glitches (+35 and +79 deg on the real clip, not physiological) no longer appear; the summary reports what the cue latch actually sees. `reset_attempt` clears the deque |
+
+### Other files
+| File | Change |
+|---|---|
+| `vision/spine_model.py` | warm-up on construction; docstring records real timings; one over-long line wrapped |
+| `scripts/demo_deadlift.py` | `check_upload` now runs **before** `resolve_spine`, so a rejected upload or `--validate-only` never loads a model |
+| `requirements-spine.txt` (new) | `onnxruntime`, `tqdm`, `OneEuroFilter`, and the `--no-deps spinepose==2.1.0` instruction; licence note (D-05) |
+| `tests/test_video_input.py` | the analysis CLI test pins `--spine proxy` so it does not silently load the real network when SpinePose is installed |
+| `tests/test_views_and_spine.py` | thresholds 12 -> 8; the "small change is not flagged" test uses a true +20 deg (reads ~7.3; +25 reads ~9.2 and is flagged); `test_demo_refuses_a_demanded_spinepose_but_auto_falls_back_to_the_contour` (skipped when SpinePose is installed); new `test_a_one_frame_fallback_to_another_spine_source_keeps_the_real_baseline` and `test_a_two_frame_keypoint_glitch_is_neither_flagged_nor_reported_as_the_lumbar_change` (each verified to fail with the old behaviour); proxy-cues-off test also asserts `max_lumbar_delta_deg is None` |
+| `tests/test_spine_regions.py` (new) | real dumbbell-row and landmine-row chains, noise regression, orientation invariance (0/90/180 deg rotations, bench-press orientation, sign flip), outlier down-weighting, degenerate input, score clipping, real-network smoke test (skipped unless SpinePose and cached weights exist) |
+| Docs | GAP_ANALYSIS G-31 rewritten, **G-33 new**, **D-05 new** (commercial licence parked); DEADLIFT_TRACKING_REQUIREMENTS section 7/8; README; CLAUDE.md |
+
+## Evidence and limits
+- Whole analysis of the user's 586-frame recording with SpinePose: ~17 s wall-clock on a laptop (decode + MediaPipe heavy + SpinePose every frame + overlay + video write); 4 reps, same as before; bridge check dropped 16 of 417 tracked frames; held lumbar change per rep +8.6, -17.1, -6.9, -8.0 deg (negative = extension); no rounding cue.
+- **That recording has an earlier version of our overlay drawn into it**, so frame-level behaviour on it is not an accuracy measurement. **No ground truth exists**; every spine threshold is provisional. Lumbar is the weakest region. Laptop timings only, nothing measured on a phone.
+
+Tests: 268 pass, 2 skipped (SpinePose-absent and weights-absent cases), excluding the 6 pre-existing pty tests. `flake8 --max-line-length=120` is clean for everything touched here; `biomechanics/geometry.py` (committed earlier, untouched in this change) has 10 pre-existing style findings, so "currently clean" in CLAUDE.md was not true.
+
+---
+
+# Addendum 6 (2026-11-20): back rounding at 90 degrees, with or without visible legs
+
+**Reported (third live test).** Facing the camera looked fine; side-on (90 degrees, either direction) back rounding was never detected; the run ended with `15/923 frames tracked`; the user asked what that number means and asked for the back to be tracked properly using the methods of the research papers, still with SpinePose for the back.
+
+**Diagnosis before changing anything.** Replaying the recording through MediaPipe and SpinePose per frame (scratch scripts in the session scratchpad; the recording has an earlier overlay burnt in, noted in G-34): a person was found in 919/923 frames and SpinePose returned a spine in all 919, but the ankle was not visible in 850 frames and the knee in 687 (the lifter stood close to a laptop webcam). Of 154 deeply bent side-on frames the ankle was visible in 65 and all four core joints in 7. "Tracked" means shoulder, hip, knee **and** ankle seen; every rule was behind that gate, so the back was seen but never analysed. 923 is just the number of frames the camera delivered in 62 s at ~15 fps; it is not a target, the ratio is the quality indicator.
+
+**What the papers provide.** Read from `docs/resarchpapers/` (text extracted with pypdf in a scratch venv outside the project): no paper gives a geometric back-rounding detector. P1 gives the nine points; P8 the definition of the fault (qualitative); P5 the convex/concave classes and a trained classifier; X1 a trained classifier; X2 says keypoints are insufficient for lumbar kinematics. Details and citations in `docs/GAP_ANALYSIS.md` G-34.
+
+## Code changes
+
+| File | Change |
+|---|---|
+| `biomechanics/spine_proxy.py` `build_spine_from_points` | **Bug fix.** Default anterior direction was `(facing, 0)` projected off the SACRUM-C1 chord; once the chord leans more than 90 deg from vertical (head below the hips) it points the wrong way and every region angle flips sign (convex rounding read as extension). Now `a_hat = facing * (-c_y, c_x)`: the chord turned a quarter turn toward `facing`; identical for leans below 90 deg, continuous beyond. An explicit `anterior=` (bench press) still wins |
+| `biomechanics/landmarks.py` | `TRUNK_LEAN_FACING_DEG = 35`; `estimate_facing_from_trunk(lm, side)`: a hinged trunk (shoulder ahead of hip by >= 35 deg from vertical, including past horizontal) votes `(direction, 3)`; `(0, 0)` when upright or shoulder/hip unreliable. `estimate_facing` itself is unchanged (an existing test pins its priority order) |
+| `biomechanics/deadlift_pipeline.py` | `_vote_facing` also takes the trunk cue when it outranks the best other cue. New `_back_only(...)`: when `compute_deadlift_angles` returns None but near-side shoulder and hip are reliable, smooth the landmarks, take the trunk inclination `inclination_from_vertical(hip, shoulder, facing)`, build the spine from the (smoothed) SpinePose points (or the proxy), call `rules.update_back_only`, and return a `FrameResult` with `back_only=True`, `trunk_incl_deg`, `hinged`, `partial_spine`, events and active flags. `_scale` is initialised from the torso alone so spine smoothing works with no legs. `FrameResult` gains `back_only`, `trunk_incl_deg`, `hinged`; the analyzer gains `frames_back_only`, `spine_log` (one dict per frame with a spine: `t_s, source, view, back_only, trunk_incl_deg, hinged, lumbar_deg, thoracic_deg, cervical_deg, pelvic_deg, curvature_visible, confidence`, capped at 200 000 rows); the summary gains `frames_back_monitored` |
+| `biomechanics/deadlift_rules.py` | New flag `UPPER_BACK_ROUNDING` (warning). `DeadliftRuleConfig`: `back_abs_cues`, `hinge_enter_deg` 30 / `hinge_exit_deg` 20, `thoracic_abs_enter_deg_model` 6 / `exit` 3, `lumbar_abs_enter_deg_model` 11 / `exit` 7, `lumbar_cues` (library default True). New `_HeldMax` (largest value held for the dwell). `DeadliftFormAnalyzer`: `hinged` property; `_update_hinge` (trunk inclination with hysteresis); `_absolute_back(t, trunk, spine, phase)`: armed by the hinge, driven by a SpinePose measurement (`spine.source == "spinepose"`, `curvature_visible`), a frame without a measurement holds the latch (reset after `ABS_STALE_S` = 0.6 s), events are `confidence="absolute"`, once per rep or, in the legs-out-of-view scope, once per hinge; `update_back_only(t, trunk, spine, phase)` is the entry point for frames without legs. `update()` calls `_absolute_back` and ORs its flags into `active`. `lumbar_cues=False` silences the SpinePose lumbar cues (relative and absolute) while still recording the values; the reported lumbar maximum no longer depends on the cue switch, only on whether the source may be reported. `RepForm` gains `peak_lumbar_abs_deg`, `peak_thoracic_abs_deg` (held values while hinged) |
+| `coaching/overlay.py` | `BACK MONITOR` header, `Legs not in view: reps are not counted`, trunk angle with `HINGED: back cue armed`, absolute thoracic/lumbar/cervical readout (lumbar marked `(info)` when its cue is off), the red spine for either rounding flag, cue texts for both flags (the lumbar text no longer says "(proxy)"), and the hint line `Not tracking reps: legs out of frame (back still monitored)...` |
+| `scripts/demo_deadlift.py` | `--lumbar-cues` (demo default off), `--spine-size` default `medium`, `--save-raw` (writes `<name>_raw.mp4` of the untouched frames, before the overlay is drawn), `<name>_spine.csv` written whenever a spine was tracked, final line now reads `N/M frames fully tracked; back analysed in K more with the legs out of view` with an explanation of "fully tracked" |
+
+## Why thoracic, why medium, why lumbar is off (measured, one lifter, labelled by eye)
+
+Hinged side-on frames, about 25 neutral (bottoms of reps in the earlier clip) against 80-100 visibly rounded (this session), raw per-frame region angles (`G-34` has the table): thoracic AUC 0.98 / 1.00 / 1.00 and d' 2.6 / 4.7 / 4.0 for SpinePose small / medium / large; lumbar AUC 0.70 / 0.93 / 0.59 with neutral frames spread from -18 to +23 deg. The thoracic threshold +6 deg sits above every neutral frame of the medium model (max -0.5) and recalls 86% of rounded frames per frame (68% small, 96% large). Medium costs 8.7 ms against 6.7 ms for small and 10.7 ms for large on this laptop (CoreML), and kept more usable frames. These are a pilot, not a validation.
+
+## Replay results (same recordings, final code)
+
+| Recording | Result |
+|---|---|
+| New session (923 frames, legs out of frame) | 69 frames fully tracked + 634 back-only; 4 back-rounding cues (about 31, 38, 42 and 52-57 s), which match visibly hunched backs in the frames; no ground truth |
+| Earlier clip (3-4 neutral-looking reps, legs in frame; re-run from a twice-annotated copy, so it counts 3 reps instead of 4 because of the extra overlay, not because of this change: verified by disabling the new facing cue) | no back-rounding cue; thoracic <= +6.1 deg in the hinged frames |
+
+## Found and fixed on the way
+- With the sign fix, the relative lumbar rule started firing on the earlier clip (3 alarms): the old sign flip had been hiding noisy deep-fold lumbar readings by luck. That is what made the lumbar evidence above necessary; it is why lumbar cues are now optional.
+- Tests that failed for good reasons were rewritten only where they encoded the old structure (a hint text kept its "Not tracking" wording instead).
+
+Tests: 298 pass, 2 skipped (SpinePose-absent and weights-absent cases), excluding the 6 pre-existing pty tests. New: `tests/test_back_monitor.py` (18), a forward-fold regression in `tests/test_spine_regions.py` (12 cases). `flake8 --max-line-length=120` is clean except the 10 old findings in `geometry.py`.
+
+**Not validated, in this order of importance:** (1) one lifter, one camera, one outfit; (2) the "rounded" and "neutral" labels were assigned by eye by the developer from a handful of frames and have not been confirmed by the lifter; (3) lumbar rounding, the fault P8 cares most about, is still not measurable reliably; (4) nothing measured on a phone.

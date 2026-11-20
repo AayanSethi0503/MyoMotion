@@ -43,7 +43,8 @@ WHITE, GREY, CYAN = (240, 240, 240), (170, 170, 170), (255, 255, 0)
 BONE = (235, 235, 235)
 
 CUE_TEXT = {
-    FormFlag.LUMBAR_ROUNDING: "CHEST UP - possible back rounding (proxy)",
+    FormFlag.LUMBAR_ROUNDING: "CHEST UP - lower back rounding",
+    FormFlag.UPPER_BACK_ROUNDING: "BACK ROUNDING - chest up, shoulders back",
     FormFlag.HIPS_RISE_EARLY: "HIPS RISING TOO FAST - push the floor away",
     FormFlag.LOCKOUT_HYPEREXTENSION: "DON'T LEAN BACK AT LOCKOUT - finish tall",
     FormFlag.BAR_DRIFT: "KEEP THE BAR OVER MID-FOOT",
@@ -76,6 +77,8 @@ def _panel(img, x0: int, y0: int, x1: int, y1: int, alpha: float = 0.55) -> None
 def next_step_hint(res: FrameResult) -> Tuple[str, Tuple[int, int, int]]:
     """What the rep counter is waiting for right now, in plain words."""
     a = res.angles
+    if a is None and res.back_only:
+        return ("Not tracking reps: legs out of frame (back still monitored). Step back to count reps", AMBER)
     if a is None:
         return "Not tracking yet: fix the items listed on the left", AMBER
     hip = a.hip_signed_deg
@@ -187,7 +190,7 @@ class OverlayRenderer:
         model = sp.source in ("spinepose", "contour")
         if not sp.curvature_visible:
             colour = (200, 150, 200)                          # muted: a midline, not a measured curve
-        elif FormFlag.LUMBAR_ROUNDING in res.active_flags:
+        elif res.active_flags & {FormFlag.LUMBAR_ROUNDING, FormFlag.UPPER_BACK_ROUNDING}:
             colour = RED
         else:
             colour = (255, 200, 60) if model else (255, 120, 255)
@@ -226,13 +229,31 @@ class OverlayRenderer:
         _panel(frame, 0, 0, int(400 * k), int(330 * k))
         x, y, dy = int(14 * k), int(40 * k), int(26 * k)
         a = res.angles
-        if a is None:
+        if a is None and res.back_only:
+            _text(frame, "BACK MONITOR", (x, y), 0.95 * k, GREEN if res.hinged else GREY, 2)
+        elif a is None:
             _text(frame, "NOT TRACKING", (x, y), 0.95 * k, AMBER, 2)
         else:
             _text(frame, res.phase.value.upper(), (x, y), 0.95 * k, PHASE_COLOURS[res.phase], 2)
         _text(frame, f"Reps: {res.rep_count}", (x, y + dy), 0.8 * k, WHITE, 2)
         fps_txt = f"{self._fps:.0f} fps" if self._fps else "- fps"
         _text(frame, fps_txt, (int(300 * k), y + dy), 0.55 * k, AMBER if (self._fps or 99) < LOW_FPS else GREY)
+        if a is None and res.back_only:
+            sp = res.partial_spine
+            rows = ["Legs not in view: reps are not counted",
+                    f"Trunk {res.trunk_incl_deg:+5.0f} deg  ({'HINGED: back cue armed' if res.hinged else 'upright'})"]
+            if sp is None:
+                rows.append("Spine: not detected")
+            elif not sp.curvature_visible:
+                rows.append("Spine: curve not visible from this angle")
+            else:
+                name = {"spinepose": "SpinePose", "contour": "back contour"}.get(sp.source, "proxy, display only")
+                rows.append(f"Spine ({name}), absolute:")
+                lum_note = "" if an.rules.cfg.lumbar_cues else " (info)"
+                rows.append(f"  thoracic {sp.thoracic_deg:+4.1f}  lumbar {sp.lumbar_deg:+4.1f}{lum_note}"
+                            f"  cerv {sp.cervical_deg:+4.1f}")
+            for i, r in enumerate(rows):
+                _text(frame, r, (x, y + dy * (i + 2)), 0.5 * k, GREY if r.startswith(("  ", "Spine")) else WHITE)
         if a is not None:
             rows = [
                 f"Hip {a.hip_signed_deg:5.1f}   Knee {a.knee_deg:5.1f} deg",
@@ -250,6 +271,10 @@ class OverlayRenderer:
                     a.spine.source, "Spine (proxy: display only), rel. to set-up:"))
                 rows.append(f"  lumbar {sd.lumbar_deg:+4.1f}  thoracic {sd.thoracic_deg:+4.1f}"
                             f"  cerv {sd.cervical_deg:+4.1f}" if sd is not None else "  baseline: waiting for set-up")
+                if a.spine.source == "spinepose":
+                    lum_note = "" if an.rules.cfg.lumbar_cues else " (info)"
+                    rows.append(f"  absolute: thoracic {a.spine.thoracic_deg:+4.1f}  lumbar {a.spine.lumbar_deg:+4.1f}"
+                                f"{lum_note}")
             else:
                 rows.append("Spine: off (ear not visible)")
             if a.bar_drift_foot is not None:
@@ -305,7 +330,7 @@ class OverlayRenderer:
         active = sorted(res.active_flags, key=lambda f: (FLAG_SEVERITY[f] != Severity.DANGER, f.value))
         fresh = self._event_msg if (self._event_msg and res.t_s <= self._event_msg[0]) else None
         lines: List[Tuple[str, Tuple[int, int, int]]] = [
-            (CUE_TEXT[f], RED if FLAG_SEVERITY[f] == Severity.DANGER else AMBER)
+            (CUE_TEXT.get(f, f.value), RED if FLAG_SEVERITY[f] == Severity.DANGER else AMBER)
             for f in active if not (fresh and fresh[3] == f)]   # a fresh event's numeric text replaces the static one
         if fresh:
             lines.append((fresh[1], RED if fresh[2] == Severity.DANGER else AMBER))

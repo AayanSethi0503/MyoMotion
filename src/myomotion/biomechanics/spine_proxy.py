@@ -224,53 +224,104 @@ def _catmull_rom(pts: np.ndarray, per_segment: int = 16) -> np.ndarray:
     return np.vstack(out)
 
 
+# Region angles from detected points are estimated from a smooth fit through all nine points, not from the direction of
+# the segment between neighbouring points. SpinePose places SACRUM, L5 and L3 only 5-25 px apart (the lumbar region is
+# short in the image), so adjacent-segment directions are dominated by keypoint noise. Simulation (spine of known
+# curvature, 224 px, noise 2 px, 6 frames averaged): adjacent segments gave a lumbar error of 13.7 deg std and
+# false-alarmed (|change| > 12 deg with NO true change) in 38% of frames; the cubic fit gave 2.6 deg std and 0%. The
+# price: the fit smooths local bends, so it under-reads a true lumbar change by about 3.5x (true +30 reads about +8.5
+# with the chord parameter used here). Thresholds are in these units (DeadliftRuleConfig.lumbar_enter_deg_model). G-33.
+REGION_FIT_DEGREE = 3
+# Below this spine length (px, SACRUM -> C1) keypoint noise swamps the angles: no angles are produced.
+MIN_SPINE_LENGTH_PX = 80.0
+
+
 def build_spine_from_points(points: np.ndarray, facing: int, scores: Optional[np.ndarray] = None,
                             min_confidence: float = 0.25, curvature_visible: bool = True,
-                            source: str = "spinepose") -> Optional[SpineProxy]:
+                            source: str = "spinepose", anterior: Optional[np.ndarray] = None,
+                            min_length_px: float = MIN_SPINE_LENGTH_PX) -> Optional[SpineProxy]:
     """Region angles from the 9 detected spine points ``[9, 2]`` in ``SPINE_LABELS`` order (C1 ... SACRUM).
 
-    Unlike the geometric proxy, these points come from a model that looks at the image, so a curved back gives
-    curved points and real region angles. Each region angle is the rotation of the spine's direction between the
-    region's lower and upper end, measured from the segments between neighbouring points, flexion positive:
+    Unlike the geometric proxy, these points come from an image-based method, so a curved back gives curved points.
+    A weighted cubic is fitted through the nine points (weights = clipped scores) and each region angle is the rotation
+    of the fitted spine direction between the region's two ends, **flexion positive**:
 
-        lumbar    = tangent at L1 - tangent at SACRUM          pelvic = inclination of SACRUM -> L5
-        thoracic  = tangent at T3 - tangent at L1              cervical = tangent at C1 - tangent at C7
+        lumbar    = tangent at L1 - tangent at SACRUM
+        thoracic  = tangent at T3 - tangent at L1
+        cervical  = tangent at C1 - tangent at C7
+        pelvic    = inclination from vertical of the tangent at SACRUM
         bend      = chord(C7 -> C1) direction - chord(SACRUM -> C7) direction
 
-    Returns None if the points are not a plausible spine (low confidence, or not ordered along SACRUM -> C1).
-    ``curvature_visible=False`` (seen from the front/back) keeps the real points and curve for drawing but zeroes
-    the angles: a side-to-side offset in the image is not spinal flexion. ``source`` tags where the points came from
-    ("spinepose": a trained spine network; "contour": the back silhouette, G-32).
+    Directions are measured in the spine's own frame: the angle of a tangent from the SACRUM -> C1 chord, positive when
+    it leans toward the *anterior* side. That makes the region angles independent of body orientation (upright for
+    deadlifts and squats, horizontal for the bench press). ``anterior`` is the unit vector pointing to the front of the
+    body in the image; if omitted it is the chord turned a quarter turn toward ``facing`` (+1 image-right, -1
+    image-left), which is correct for a person standing, hinging or folded past horizontal. ``pelvic_deg`` alone uses
+    the image vertical and is only meaningful for an upright body.
+
+    Returns None if the points are not a plausible spine (low confidence, too short to measure, or not ordered along
+    SACRUM -> C1). ``scores`` may exceed 1 (SimCC peak values); they are clipped to [0, 1]. ``curvature_visible=False``
+    (seen from the front/back) keeps the points and curve for drawing but zeroes the angles: a side-to-side offset in
+    the image is not spinal flexion. ``source`` tags where the points came from ("spinepose" or "contour", G-32).
     """
     pts = np.asarray(points, float)
     if pts.shape != (9, 2) or not np.all(np.isfinite(pts)):
         return None
-    conf = float(np.mean(scores)) if scores is not None else 1.0
+    sc = np.clip(np.asarray(scores, float), 0.0, 1.0) if scores is not None else np.ones(9)
+    conf = float(np.mean(sc))
     if conf < min_confidence:
         return None
     up = pts[::-1]                                        # SACRUM, L5, L3, L1, T8, T3, C7, C4, C1 (bottom to top)
+    w_up = np.clip(sc[::-1], 0.05, 1.0)
     chord = up[-1] - up[0]
     length = float(np.hypot(*chord))
-    if length < 1e-6:
+    if length < max(min_length_px, 1e-6):
         return None
-    along = (up - up[0]) @ (chord / length)               # position of each point along the sacrum -> C1 chord
-    if np.any(np.diff(along) < -0.02 * length):           # not monotonic: the detection is scrambled
+    c_hat = chord / length
+    along = (up - up[0]) @ c_hat                          # position of each point along the sacrum -> C1 chord
+    # Order check on the TRUSTED points only (score >= min_confidence): one low-score wild point must be down-weighted
+    # by the fit, not veto the whole frame. Fewer than 5 trusted points cannot support the cubic fit.
+    trusted = sc[::-1] >= min_confidence
+    if int(trusted.sum()) < 5 or np.any(np.diff(along[trusted]) < -0.02 * length):    # scrambled detection
         return None
 
-    d = [inclination_from_vertical(up[i], up[i + 1], facing) for i in range(8)]   # direction of each segment, upward
-    if not all(math.isfinite(v) for v in d):
+    if anterior is None:
+        # The front of the trunk is the chord turned a quarter turn toward the way the person faces. This is the same as
+        # projecting (facing, 0) off the chord while the trunk leans less than 90 deg from vertical, but it stays
+        # correct (and continuous) in a deep forward fold where the head is below the hips: projecting (facing, 0)
+        # flips sign there and read convex rounding as extension (found on a real clip; docs/GAP_ANALYSIS.md G-34).
+        a_hat = float(facing) * np.array([-c_hat[1], c_hat[0]])
+    else:
+        ant = np.asarray(anterior, float)
+        ant = ant - (ant @ c_hat) * c_hat                 # the anterior direction perpendicular to the chord
+        n_ant = float(np.hypot(*ant))
+        if n_ant < 1e-6:
+            return None                                   # anterior is along the spine: orientation is ambiguous
+        a_hat = ant / n_ant
+
+    def lean(v: np.ndarray) -> float:                     # angle from the chord, + toward the anterior side
+        return math.degrees(math.atan2(float(v @ a_hat), float(v @ c_hat)))
+
+    # Parametrise by position along the SACRUM -> C1 chord, NOT by cumulative path length: with path length one wild
+    # point inflates the length and shifts every other point's parameter (a single 60 px outlier at weight 0.05
+    # corrupted the lumbar angle by 165 deg in simulation; 1.1 deg with the chord parameter).
+    t = along / along[-1]
+    cx, cy = (np.polyfit(t, up[:, k], REGION_FIT_DEGREE, w=w_up) for k in (0, 1))
+    dcx, dcy = np.polyder(cx), np.polyder(cy)
+
+    def tangent(i: int) -> np.ndarray:
+        return np.array([np.polyval(dcx, t[i]), np.polyval(dcy, t[i])])
+
+    th = [lean(tangent(i)) for i in range(9)]
+    if not all(math.isfinite(v) for v in th):
         return None
-
-    def avg(a: float, b: float) -> float:                 # mean of two directions without a +-180 wrap problem
-        return a + wrap_deg(b - a) / 2.0
-
-    t_sacrum, t_l1 = d[0], avg(d[2], d[3])
-    t_t3, t_c7, t_c1 = avg(d[4], d[5]), avg(d[5], d[6]), d[7]
-    lumbar = wrap_deg(t_l1 - t_sacrum)
-    thoracic = wrap_deg(t_t3 - t_l1)
-    cervical = wrap_deg(t_c1 - t_c7)
-    pelvic = d[0]
-    bend = wrap_deg(inclination_from_vertical(up[6], up[8], facing) - inclination_from_vertical(up[0], up[6], facing))
+    lumbar = wrap_deg(th[3] - th[0])                      # tangent at L1 - tangent at SACRUM
+    thoracic = wrap_deg(th[5] - th[3])                    # tangent at T3 - tangent at L1
+    cervical = wrap_deg(th[8] - th[6])                    # tangent at C1 - tangent at C7
+    pelvic = inclination_from_vertical((0.0, 0.0), tangent(0), facing)
+    bend = wrap_deg(lean(up[8] - up[6]) - lean(up[6] - up[0]))
+    if not all(math.isfinite(v) for v in (pelvic, bend)):
+        return None
     if not curvature_visible:
         lumbar = thoracic = cervical = bend = pelvic = 0.0
     labelled = {label: pts[i].copy() for i, label in enumerate(SPINE_LABELS)}

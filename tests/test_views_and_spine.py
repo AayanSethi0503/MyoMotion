@@ -236,10 +236,10 @@ def run_with_model_spine(flex_at_pull):
 
 def test_a_really_rounding_back_is_flagged_with_direct_confidence_from_detected_points():
     s = run_with_model_spine(70.0)
-    assert s["reps"][0]["form"]["max_lumbar_delta_deg"] >= 12.0            # the MEASURED lumbar change, not the knob
+    assert s["reps"][0]["form"]["max_lumbar_delta_deg"] >= 8.0             # the MEASURED lumbar change, not the knob
     assert s["flag_counts"]["lumbar_rounding"] == 1
     ev = s["events"][0]
-    assert ev["confidence"] == "direct" and ev["threshold"] == 12.0 and "possible" not in ev["message"]
+    assert ev["confidence"] == "direct" and ev["threshold"] == 8.0 and "possible" not in ev["message"]
     assert s["frames_by_spine_source"].get("spinepose", 0) > 0 and "proxy" not in s["frames_by_spine_source"]
 
 
@@ -249,12 +249,12 @@ def test_a_straight_back_from_detected_points_is_not_flagged():
 
 
 def test_a_small_real_curvature_change_below_the_threshold_is_not_flagged():
-    s = run_with_model_spine(25.0)
-    assert 0.0 < s["reps"][0]["form"]["max_lumbar_delta_deg"] < 12.0
+    s = run_with_model_spine(20.0)                       # measured here: true +20 reads ~7.3, +25 ~9.2 (flagged)
+    assert 0.0 < s["reps"][0]["form"]["max_lumbar_delta_deg"] < 8.0
     assert s["flag_counts"]["lumbar_rounding"] == 0
 
 
-def test_baseline_restarts_when_the_spine_source_changes():
+def test_a_change_of_spine_source_is_tagged_per_frame():
     an = DeadliftAnalyzer()
     spec = ClipSpec(n_reps=1, noise_px=0.3)
     seen = set()
@@ -264,6 +264,46 @@ def test_baseline_restarts_when_the_spine_source_changes():
         if r.angles and r.angles.spine:
             seen.add(r.angles.spine.source)
     assert seen == {"spinepose", "proxy"}
+
+
+def test_a_two_frame_keypoint_glitch_is_neither_flagged_nor_reported_as_the_lumbar_change():
+    """Real clip: single-frame SpinePose glitches read +35 and +79 deg. The rep summary reports the change HELD for the
+    dwell time, so those never appear (and never raise the cue)."""
+    spec = ClipSpec(n_reps=1, noise_px=0.3)
+    an = DeadliftAnalyzer()
+    spike_left, fired, raw_peak = 0, False, 0.0
+    for t, img, w in generate_clip_3d("good", spec, Body(), yaw_deg=0.0):
+        glitch = spike_left > 0
+        r = an.process(t, img, world=w, spine_points=curved_points_for_frame(img, 60.0 if glitch else 0.0))
+        spike_left = max(spike_left - 1, 0)
+        if not fired and r.phase.value == "Eccentric Descent":
+            spike_left, fired = 2, True                                              # glitch the next two frames
+        if r.spine_delta:
+            raw_peak = max(raw_peak, r.spine_delta.lumbar_deg)
+    form = an.summary()["reps"][0]["form"]
+    assert raw_peak > 12.0                                                             # the glitch was really seen...
+    assert form["max_lumbar_delta_deg"] is not None and form["max_lumbar_delta_deg"] < 8.0   # ...but not reported
+    assert an.summary()["flag_counts"]["lumbar_rounding"] == 0
+
+
+def test_a_one_frame_fallback_to_another_spine_source_keeps_the_real_baseline():
+    """Found on a real clip: SpinePose missed a frame, the proxy took over for one frame, the baseline was wiped and
+    the lumbar delta stayed unavailable until the next set-up (reps 3 and 4 had no lumbar reading at all). Each source
+    now keeps its own baseline."""
+    from myomotion.biomechanics import DeadliftRuleConfig
+    spec = ClipSpec(n_reps=1, noise_px=0.5)
+    an = DeadliftAnalyzer(rule_cfg=DeadliftRuleConfig(proxy_spine_cues=False))
+    descent_with_delta, descent_frames = 0, 0
+    for i, (t, img, w) in enumerate(generate_clip_3d("good", spec, Body(), yaw_deg=0.0)):
+        s, asc = progress_at(t, spec)
+        flex = 40.0 * min(s / 0.10, 1.0) * (1 - min(max((s - 0.35) / 0.25, 0.0), 1.0))
+        miss = i % 7 == 3 and s > 0.05                                              # misses after the set-up is locked
+        r = an.process(t, img, world=w, spine_points=None if miss else curved_points_for_frame(img, flex))
+        if r.phase.value == "Eccentric Descent" and r.angles.spine.source == "spinepose":
+            descent_frames += 1
+            descent_with_delta += r.spine_delta is not None
+    assert an.summary()["frames_by_spine_source"].get("proxy", 0) > 0              # the fallback really happened
+    assert descent_frames > 10 and descent_with_delta == descent_frames           # the baseline survived the flicker
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +413,9 @@ def test_proxy_rounding_cue_can_be_switched_off_but_the_spine_is_still_computed(
         r = an.process(t, img, world=w)
         if r.spine_delta:
             seen_delta = max(seen_delta, r.spine_delta.lumbar_deg)
-    assert an.summary()["flag_counts"]["lumbar_rounding"] == 0 and seen_delta > 4.0     # shown, not alarmed
+    summ = an.summary()
+    assert summ["flag_counts"]["lumbar_rounding"] == 0 and seen_delta > 4.0     # shown, not alarmed
+    assert summ["reps"][0]["form"]["max_lumbar_delta_deg"] is None               # and not reported as a measured change
 
 
 def test_demo_defaults_to_no_proxy_cues_and_opts_in_with_a_flag(tmp_path):

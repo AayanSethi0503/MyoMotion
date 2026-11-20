@@ -194,7 +194,7 @@ MODEL = os.path.join(os.path.dirname(__file__), "..", "models", "pose_landmarker
 @pytest.mark.skipif(not os.path.isfile(MODEL), reason="MediaPipe model not downloaded (models/ is gitignored)")
 def test_cli_analyses_an_upload_and_warns_when_no_person_is_found(tmp_path, capsys):
     path = make_video(tmp_path / "empty_scene.mp4", size=(960, 540), seconds=2.0)
-    rc = _demo().main(["--source", path, "--no-display", "--no-video", "--out-dir", str(tmp_path)])
+    rc = _demo().main(["--source", path, "--no-display", "--no-video", "--spine", "proxy", "--out-dir", str(tmp_path)])
     assert rc == 0
     summary = json.loads((tmp_path / "empty_scene_summary.json").read_text())
     assert summary["meta"]["input"] == "uploaded_video" and summary["meta"]["video"]["ok"] is True

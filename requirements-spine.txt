@@ -1,0 +1,10 @@
+# OPTIONAL: trained spine keypoints (SpinePose, docs/GAP_ANALYSIS.md G-31). Not part of requirements.txt on purpose.
+#
+#   pip install -r requirements-spine.txt
+#   pip install --no-deps spinepose==2.1.0      # --no-deps: the package declares torch, onnx and anytree but never imports them
+#
+# Licence: CC-BY-NC-4.0 for the code AND the model weights (non-commercial). Commercial use is an open product decision (D-05).
+# Weights (small 22.8 MB) are downloaded on first use to ~/.cache/spinepose/.
+onnxruntime
+tqdm
+OneEuroFilter
