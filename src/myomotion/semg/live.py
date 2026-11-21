@@ -14,6 +14,11 @@ It runs in three stages:
   3. LIVE:             %MVC for every sample.
 The 100% step (MVC above rest) comes from mvc.json, measured by scripts/semg/compute_mvc.py in
 the same session (same electrodes, same divider).
+
+Data structures (this file): an EmgFilter (list of biquads with state) and a RunningRms (deque ring buffer);
+    LiveReading dataclasses.
+Time complexity (this file): O(S) per sample for the S = 6 filter sections; O(1) for the running RMS and the %MVC
+    arithmetic.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -32,6 +37,7 @@ PERCENT = 100.0
 # LiveConfig  (the CONFIG for this file)
 # What:  timing of the three stages and the filter settings.
 # Data structures: a frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LiveConfig:
@@ -51,6 +57,7 @@ LIVE_CONFIG = LiveConfig()
 # What:  what the meter knows after one sample: its stage, the envelope, and the
 #        %MVC (None until the rest level is known).
 # Data structures: a frozen dataclass (one reading never changes).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LiveReading:
@@ -68,6 +75,7 @@ class LiveReading:
 # Data structures: an EmgFilter (list of biquads with state) and a RunningRms (deque
 #        ring buffer), so each sample costs the same small amount of work no matter
 #        how long the session runs; two counters and a running sum for the rest level.
+# Time:  O(S) per sample for the S = 6 filter sections; O(1) for the RMS.  Space: O(window).
 # ---------------------------------------------------------------------------
 @dataclass
 class LivePercentMvc:

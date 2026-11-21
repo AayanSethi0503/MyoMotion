@@ -11,6 +11,11 @@ Ctrl+C stops.
 Each line: the raw level at the pin (mV), the hum (RMS of the 50 Hz bands and their harmonics, mV), the
 muscle-band noise left without the hum (mV), the highest sample (clipping check) and a verdict.
 For reference (21 Nov): TESTCV/S03 (good) had hum 6.8 mV; TEST/S42 and P01/S02 (bad contact) about 160-280 mV.
+
+Data structures (this file): a Python list collecting one 2-second window (1000 samples); NumPy arrays for the
+    spectrum; a HumReading dataclass per line.
+Time complexity (this file): O(W^2) per window for the direct DFT of W = 1000 samples (a few tens of ms), once every
+    2 s; O(b) to read b bytes from the ESP32.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ CONFIG = {
 # HumReading
 # What:  the numbers for one window of samples.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (five floats); verdict is O(1).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class HumReading:
@@ -57,6 +63,8 @@ class HumReading:
     muscle_band_mv: float     # RMS of 20-250 Hz without the mains bands (what is left when relaxed)
     peak_mv: float            # highest sample (clipping check)
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: two float comparisons; a str out.
     @property
     def verdict(self) -> str:
         """GOOD / OK / HIGH from the hum alone."""
@@ -83,6 +91,8 @@ def measure_window(values_mv: np.ndarray, rate_hz: float = CONFIG["rate_hz"]) ->
                       peak_mv=float(np.max(values)))
 
 
+# Time:  O(1): one formatted line.  Space: O(1).
+# Data structures: a HumReading dataclass in, a str out.
 def format_reading(elapsed_s: float, reading: HumReading) -> str:
     """One printed line."""
     clip = "  NEAR CLIPPING" if reading.peak_mv >= CONFIG["ceiling_mv"] else ""

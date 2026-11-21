@@ -10,6 +10,9 @@ Writes the same two random 128-bit keys to:
 The key id printed at the end is a fingerprint, safe to show: the ESP32 sends it in its hello line and the
 laptop refuses to talk to a board whose id differs. Thin wrapper: the logic is in
 src/myomotion/semg/secure_link.py (make_keys, save_keys, LinkKeys.key_id).
+
+Data structures (this file): a LinkKeys dataclass of bytes; a dict for keys.json; text for secrets.h.
+Time complexity (this file): O(1): two 16-byte random keys and one SHA-256.
 """
 
 from __future__ import annotations

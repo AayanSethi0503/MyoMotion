@@ -19,6 +19,13 @@
 //
 // The two AES operations are given from outside (BlockCipher, AeadCipher): the ESP32 uses mbedtls with
 // its hardware AES, the PC test uses OpenSSL. Encryption primitives are never home-made.
+//
+// Data structures (this file): Biquad structs (5 coefficients + 2 state values); a fixed array of Biquads
+//   per channel (EmgFilterChain; no heap on the microcontroller); fixed char / byte arrays for lines, nonces
+//   and tags; two abstract interfaces (BlockCipher, AeadCipher) so the same encoder runs on mbedtls (ESP32)
+//   and OpenSSL (PC test).
+// Time complexity (this file): per sample O(C * (S + 1)): S = 6 filter steps and one AES block for each of
+//   the C = 3 channels; per batch O(m) for AES-GCM and base64 of the m-byte batch text; the rest is O(1).
 
 #pragma once
 
@@ -55,11 +62,13 @@ const double PI_VALUE = 3.14159265358979323846;
 // What:  one second-order filter section, Direct Form II Transposed, sample by sample.
 //        Same equations as Biquad in dsp.py (step, dc_gain, prime).
 // Time:  O(1) per sample.  Space: O(1): five coefficients and two memory values.
+// Data structures: a plain struct of seven doubles.
 // ---------------------------------------------------------------------------
 struct Biquad {
   double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
   double z1 = 0, z2 = 0;
 
+  // Time O(1): three multiply-adds per output.
   double step(double x) {
     double y = b0 * x + z1;
     z1 = b1 * x - a1 * y + z2;
@@ -67,9 +76,11 @@ struct Biquad {
     return y;
   }
 
+  // Time O(1): the gain for a constant input.
   double dcGain() const { return (b0 + b1 + b2) / (1 + a1 + a2); }
 
   // Start as if the input had always been x0; returns the steady output.
+  // Time O(1).
   double prime(double x0) {
     double y0 = dcGain() * x0;
     z2 = b2 * x0 - a2 * y0;
@@ -79,6 +90,7 @@ struct Biquad {
 };
 
 // RBJ cookbook high-pass section (as highpass_biquad in dsp.py).
+// Time O(1) (one sin, one cos).  Data structures: returns a Biquad struct by value.
 inline Biquad highpassBiquad(double cutoffHz, double rateHz, double q) {
   double w0 = 2 * PI_VALUE * cutoffHz / rateHz;
   double alpha = sin(w0) / (2 * q);
@@ -94,6 +106,7 @@ inline Biquad highpassBiquad(double cutoffHz, double rateHz, double q) {
 }
 
 // RBJ cookbook notch section (as notch_biquad in dsp.py).
+// Time O(1) (one sin, one cos).  Data structures: returns a Biquad struct by value.
 inline Biquad notchBiquad(double centreHz, double rateHz, double bandwidthHz) {
   double w0 = 2 * PI_VALUE * centreHz / rateHz;
   double alpha = sin(w0) / (2 * (centreHz / bandwidthHz));
@@ -119,6 +132,7 @@ struct EmgFilterChain {
   Biquad sections[MAX_SECTIONS];
   int count = 0;
 
+  // Time O(S): one section per high-pass stage and per mains harmonic below Nyquist.
   void design(double rateHz) {
     count = 0;
     const double qs[2] = {1 / (2 * cos(PI_VALUE / 8)), 1 / (2 * cos(3 * PI_VALUE / 8))};
@@ -133,12 +147,14 @@ struct EmgFilterChain {
     }
   }
 
+  // Time O(S): each section is primed with the steady output of the one before it.
   void prime(double x0) {
     for (int i = 0; i < count; i++) {
       x0 = sections[i].prime(x0);
     }
   }
 
+  // Time O(S): the sample passes through the sections in order.
   double step(double x) {
     for (int i = 0; i < count; i++) {
       x = sections[i].step(x);
@@ -148,6 +164,7 @@ struct EmgFilterChain {
 };
 
 // The value that gets encrypted: round(y^2 * 1000), the same rounding as he_power in secure_link.py.
+// Time O(1).  Data structures: a double in, a uint64_t out.
 inline uint64_t hePower(double yMv) {
   return (uint64_t)floor(yMv * yMv * POWER_SCALE + 0.5);
 }
@@ -157,6 +174,7 @@ inline uint64_t hePower(double yMv) {
 // ---------------------------------------------------------------------------
 
 // 16 lowercase hex digits of a 64-bit number. Time O(16).
+// Data structures: a 16-character lookup string; a 17-byte char array out (16 digits + NUL).
 inline void hex64(uint64_t value, char out[17]) {
   const char* digits = "0123456789abcdef";
   for (int i = 15; i >= 0; i--) {
@@ -168,6 +186,7 @@ inline void hex64(uint64_t value, char out[17]) {
 
 // Base64 (RFC 4648, with = padding). Returns the length written, or 0 if it does not fit.
 // Time O(n). Every 3 bytes become 4 characters from a 64-character alphabet.
+// Data structures: a 64-character lookup table; each 3-byte group held as a 24-bit number in a uint32_t.
 inline size_t base64Encode(const uint8_t* data, size_t length, char* out, size_t capacity) {
   const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   size_t needed = 4 * ((length + 2) / 3);
@@ -191,12 +210,14 @@ inline size_t base64Encode(const uint8_t* data, size_t length, char* out, size_t
 // ---------------------------------------------------------------------------
 // Crypto interfaces, implemented by the caller (mbedtls on the ESP32, OpenSSL on a PC)
 // ---------------------------------------------------------------------------
+// BlockCipher: interface (one pure virtual function).  Time O(1) per 16-byte block.
 class BlockCipher {                      // AES-128 on one 16-byte block, key already loaded
  public:
   virtual ~BlockCipher() {}
   virtual void encryptBlock(const uint8_t in[16], uint8_t out[16]) = 0;
 };
 
+// AeadCipher: interface (one pure virtual function).  Time O(m) to seal m bytes.
 class AeadCipher {                       // AES-128-GCM, key already loaded
  public:
   virtual ~AeadCipher() {}
@@ -214,10 +235,12 @@ class AeadCipher {                       // AES-128-GCM, key already loaded
 // ---------------------------------------------------------------------------
 class SecureEncoder {
  public:
+  // Time O(1).  Data structures: references to the two ciphers; the key id string (not copied).
   SecureEncoder(BlockCipher& heCipher, AeadCipher& linkCipher, const char* keyId)
       : heCipher_(heCipher), linkCipher_(linkCipher), keyId_(keyId) {}
 
   // A new connection: new random session, counters and filters start again.
+  // Time O(S * C) to design the C filter chains.  Data structures: the 8-byte session array; the chains.
   void begin(const uint8_t session[LINK_SESSION_BYTES]) {
     memcpy(session_, session, LINK_SESSION_BYTES);
     sampleNumber_ = 0;
@@ -229,6 +252,7 @@ class SecureEncoder {
   }
 
   // H,<session hex>,<key id>,<version>\n  Returns the length, 0 if it does not fit.
+  // Time O(1) (8 session bytes -> 16 hex digits).  Data structures: a 17-byte char array on the stack.
   size_t helloLine(char* out, size_t capacity) const {
     char sessionHex[2 * LINK_SESSION_BYTES + 1];
     for (int i = 0; i < LINK_SESSION_BYTES; i++) {
@@ -239,6 +263,7 @@ class SecureEncoder {
   }
 
   // The homomorphic key of sample n, channel c (first 8 bytes of the AES output, little-endian).
+  // Time O(1): one AES block (fixed 10 rounds).  Data structures: two 16-byte arrays (counter block, output).
   uint64_t heKey(uint32_t n, int channel) {
     uint8_t block[16] = {0};
     uint8_t out[16];
@@ -257,6 +282,8 @@ class SecureEncoder {
   }
 
   // Appends the D and P lines of one sample to the batch text. False (nothing added) if it does not fit.
+  // Time O(C * (S + 1)) = O(1) for fixed C and S: per channel S filter steps, one AES block, 16 hex digits.
+  // Data structures: a 160-byte line array on the stack; the caller's batch text (appended in place).
   bool appendSample(char* text, size_t& used, size_t capacity, uint32_t timeUs, const uint16_t mv[EMG_CHANNELS]) {
     char line[160];
     int length = snprintf(line, sizeof(line), "D,%lu,%u,%u,%u\nP,%lu,%lu", (unsigned long)timeUs,
@@ -292,6 +319,7 @@ class SecureEncoder {
   }
 
   // Appends any ready-made line (e.g. "E,123,LED_ON\n"). False if it does not fit.
+  // Time O(L) for an L-character line.  Data structures: the caller's char array (appended in place).
   static bool appendLine(char* text, size_t& used, size_t capacity, const char* line) {
     size_t length = strlen(line);
     if (used + length >= capacity) {
@@ -305,6 +333,8 @@ class SecureEncoder {
 
   // Seals the batch text into one X line. Returns its length, 0 on failure.
   // cipherScratch must hold `length` bytes.
+  // Time O(m) for m bytes: one AES-GCM pass + base64 (4 characters per 3 bytes).
+  // Data structures: a 12-byte nonce and a 16-byte tag array on the stack; the caller's arrays.
   size_t seal(const char* text, size_t length, uint8_t* cipherScratch, char* out, size_t capacity) {
     uint8_t nonce[LINK_NONCE_BYTES];
     uint8_t tag[LINK_TAG_BYTES];
@@ -342,6 +372,7 @@ class SecureEncoder {
     return used;
   }
 
+  // Time O(1): read-only counters (for tests and the status line).
   uint32_t framesSealed() const { return frameCounter_; }
   uint32_t samplesEncoded() const { return sampleNumber_; }
 

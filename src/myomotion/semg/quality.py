@@ -15,6 +15,12 @@ Warnings (reported, do not fail TC01, but should be fixed in hardware):
    software, but less hum means cleaner data).
 5. ADC floor: many rest samples stuck at the ESP32's ~142 mV floor (a raw signal swings
    below that and its lower part is lost; a mid-range bias would fix it).
+
+Data structures (this file): a Recording dataclass (NumPy int64 times, float64 signal, list of Cue); boolean NumPy
+    masks for rest and active samples; lists of (start, end) windows; a QualityReport dataclass; a dict for
+    quality.json.
+Time complexity (this file): O(N + E log E) to load N samples and E cues; O(N) for the masks, clipping and drift;
+    the direct DFTs of the rest (R samples) and active windows (A samples), O(R^2 + A^2), dominate TC01.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -48,6 +54,7 @@ ACTIVE_PHASES = frozenset({"ECCENTRIC", "ISOMETRIC_HOLD", "CONCENTRIC"})   # mus
 # Data structures: a frozen dataclass: named, typed, cannot be changed by accident.
 # Values marked "provisional" are starting guesses: tune them on good recordings
 # and write the final values in the report.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class QualityConfig:
@@ -97,6 +104,7 @@ def ceiling_for(values_note: str) -> float:
 # What:  one phase cue from events.csv: when it started and which phase it is.
 # Data structures: a frozen dataclass with two fields (a cue is a record of the
 #        past and should never be edited).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Cue:
@@ -115,6 +123,7 @@ class Cue:
 #              Two parallel arrays (index i = sample i), so NumPy can work on all at once.
 #   cues       list of Cue, sorted by time (walked in order).
 #   baseline_s seconds of real rest the recorder kept (the countdown is not included).
+# Time:  O(1) to build (references to the arrays, no copies).
 # ---------------------------------------------------------------------------
 @dataclass
 class Recording:
@@ -132,6 +141,7 @@ class Recording:
 # Data structures: a dataclass (one named field per number, so the printout and
 #        quality.json explain themselves); rep_ratios is a list with one value per
 #        rep; `passed` is a computed property.
+# Time:  O(R) to build for the R per-rep ratios; passed is O(1).
 # ---------------------------------------------------------------------------
 @dataclass
 class QualityReport:
@@ -159,6 +169,8 @@ class QualityReport:
     hum_warning: bool
     floor_warning: bool
 
+    # Time:  O(1).
+    # Data structures: three bools combined with `and`.
     @property
     def passed(self) -> bool:
         """TC01 passes if the three checks pass (warnings do not fail it)."""
@@ -407,9 +419,13 @@ def check_quality(recording: Recording, cfg: QualityConfig = CONFIG) -> QualityR
 # ---------------------------------------------------------------------------
 def format_report(report: QualityReport, cfg: QualityConfig = CONFIG) -> str:
     """Readable TC01 summary: PASS/FAIL per check, OK/WARN per warning."""
+    # Time:  O(1).
+    # Data structures: a bool in, a str out.
     def verdict(ok: bool) -> str:
         return "PASS" if ok else "FAIL"
 
+    # Time:  O(1).
+    # Data structures: a bool in, a str out.
     def warn(flag: bool) -> str:
         return "WARN" if flag else "OK  "
 

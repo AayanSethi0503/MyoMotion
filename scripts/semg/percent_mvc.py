@@ -11,6 +11,11 @@ Writes into the set folder:
     percent_mvc.csv   t_us, envelope_mv, percent_mvc   (one row per sample: the measured Y(t))
     percent_mvc.json  the MVC used and the per-phase summary
     percent_mvc.png   %MVC over time with the phases shaded
+
+Data structures (this file): a Recording, a NormalisedSet (NumPy arrays and a list of PhaseStat), a matplotlib
+    figure.
+Time complexity (this file): O(N * S) for the envelope (N samples, S = 6 filter sections) plus O(N * P) for the per-
+    phase summary of P phase windows.
 """
 
 from __future__ import annotations

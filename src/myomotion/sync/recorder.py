@@ -14,6 +14,13 @@ Two clocks, kept apart on purpose:
                 (video_frames.csv). The video file itself is written at one nominal frame rate.
 The LED flashes appear on both clocks; src/myomotion/sync/align.py fits the line between them, exactly
 as for phone video. The laptop's own clock (pc_time_s) is stored too, but only to place the cues.
+
+Data structures (this file): Step, SetPlan, RecordingResult and CameraSettings dataclasses; SharedData (lists and a
+    deque under a lock) shared by the camera loop and the ESP32 reader thread; lists of frame rows and cues; a
+    cv2.VideoWriter.
+Time complexity (this file): real time: O(F + N) for F frames and N samples; O(S) per sample in the reader thread
+    (live %MVC); O(P) per frame to write it and draw the live view (P pixels); O(1) per frame to hand it to the live
+    CV.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -41,6 +48,7 @@ US_PER_S = 1_000_000
 # RecorderConfig  (the CONFIG for this file)
 # What:  every number the recorder uses: timing of the set, camera, display.
 # Data structures: a frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RecorderConfig:
@@ -109,6 +117,7 @@ def phases_for(exercise: str) -> tuple[tuple[str, str, str], ...]:
 #        it starts, extra markers (SET_START, SYNC_MID, SET_END) and whether the LED
 #        flashes at its start.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Step:
@@ -198,6 +207,7 @@ def next_set_folder(data_dir: Path, participant: str, exercise: str, posture: st
 #        One lock guards it; the main thread only takes short looks.
 # Data structures: lists of rows (appended in time order), deque ring buffer for the
 #        live trace (old points drop out by themselves), the latest meter reading.
+# Time:  O(1) per append; the lock makes each update atomic between the two threads.
 # ---------------------------------------------------------------------------
 @dataclass
 class SharedData:
@@ -224,6 +234,8 @@ class SharedData:
 class EspReader(threading.Thread):
     """Background reader of the ESP32 stream."""
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: references to the stream, meter and SharedData; ints.
     def __init__(self, stream: EspStream, meter: LivePercentMvc, channel_index: int, shared: SharedData,
                  start: float, show_percent: bool, cfg: RecorderConfig = RECORDER_CONFIG) -> None:
         super().__init__(daemon=True)
@@ -232,6 +244,9 @@ class EspReader(threading.Thread):
         self.running = True
         self._count = 0
 
+    # Time:  O(n * S) per loop for the n samples that arrived (one filter step each, S sections); runs until stop().
+    #        Space: O(n).
+    # Data structures: SharedData lists and deques under its lock; a list of board events.
     def run(self) -> None:
         while self.running:
             try:
@@ -256,6 +271,8 @@ class EspReader(threading.Thread):
                 for event in events:
                     self.shared.board_events.append((now, event.t_us, "board", event.name, ""))
 
+    # Time:  O(1).
+    # Data structures: a bool flag read by the thread.
     def stop(self) -> None:
         self.running = False
 
@@ -342,6 +359,8 @@ def _draw_trace(view: np.ndarray, box: tuple[int, int, int, int], trace: list[tu
         cv2.polylines(view, [np.array(points, dtype=np.int32)], False, (180, 120, 255), 2, cv2.LINE_AA)
 
 
+# Time:  O(L) for the L trace points (max).  Space: O(1).
+# Data structures: a list of (time, value) tuples.
 def _meter_scale(unit: str, trace: list[tuple[float, float]], cfg: RecorderConfig = RECORDER_CONFIG) -> float:
     """Top of the bar: 120 %MVC, or in mV the largest recent value (at least 50)."""
     return cfg.bar_max_percent if unit == "%MVC" else max(50.0, max((v for _, v in trace), default=50.0))
@@ -378,6 +397,8 @@ def draw_overlay(frame: np.ndarray, step: Step | None, reps: int, seconds_left: 
     return view
 
 
+# Time:  O(1): a fixed number of text and shape calls.  Space: O(1).
+# Data structures: a NumPy image drawn in place; a Step dataclass.
 def _draw_cue(view: np.ndarray, width: int, step: Step | None, reps: int, seconds_left: float, elapsed: float) -> None:
     """Cue text, rep counter and REC dot along the top 54 px of view (in place)."""
     import cv2
@@ -441,6 +462,8 @@ class CameraSettings:
     note: str                  # one line for the console and metadata.json
 
 
+# Time:  O(1).  Space: O(1).
+# Data structures: a str comparison; a CameraSettings dataclass out.
 def camera_settings(platform: str = sys.platform) -> CameraSettings:
     """Camera settings for an operating system (sys.platform value)."""
     if platform.startswith("linux"):
@@ -459,10 +482,13 @@ def camera_settings(platform: str = sys.platform) -> CameraSettings:
 #        and no driver times (camera_settings above). Auto exposure is restored on close.
 # Data structures: cv2.VideoCapture; CameraSettings.
 # Files used: /dev/video<index> on Linux; the built-in camera on macOS.
+# Time:  O(P) per frame read for P pixels, plus the camera's own frame period (~33 ms at 30 fps).
 # ---------------------------------------------------------------------------
 class Webcam:
     """Laptop camera with per-frame timestamps where the driver gives them."""
 
+    # Time:  O(1) (opens the device).  Space: O(1).
+    # Data structures: a cv2.VideoCapture; a CameraSettings dataclass; a dict of camera info.
     def __init__(self, index: int = 0, width: int = 640, height: int = 480, exposure: float | None = 150.0,
                  platform: str = sys.platform) -> None:
         import cv2
@@ -484,6 +510,8 @@ class Webcam:
                      "frame_times": "camera driver" if self.settings.driver_stamps else "laptop clock at read",
                      "platform": platform}
 
+    # Time:  O(P) for a P-pixel frame (the driver copies it).  Space: O(P).
+    # Data structures: a NumPy image; a float timestamp or None.
     def read(self) -> tuple[bool, np.ndarray | None, float | None]:
         """(ok, frame, driver timestamp in seconds, or None: the recorder then uses the laptop clock)."""
         ok, frame = self.cap.read()
@@ -492,6 +520,8 @@ class Webcam:
         stamp = self.cap.get(self.cv2.CAP_PROP_POS_MSEC) / 1000.0
         return ok, frame, (stamp if stamp and stamp > 0 else None)
 
+    # Time:  O(1).
+    # Data structures: releases the cv2.VideoCapture.
     def close(self) -> None:
         if self.fixed_exposure:
             self.cap.set(self.cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # > 3 = back to automatic
@@ -502,6 +532,7 @@ class Webcam:
 # SetPlan / RecordingResult
 # What:  what to record (exercise, reps, tempo, who) and what came out.
 # Data structures: dataclasses.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SetPlan:
@@ -515,6 +546,8 @@ class SetPlan:
     channels: tuple[str, ...] = ("forearm",)
 
 
+# Time:  O(1) to build.
+# Data structures: a dataclass: the folder Path, a dict of quality numbers, counts.
 @dataclass
 class RecordingResult:
     """What the recorder saved."""
@@ -679,6 +712,8 @@ def record_set(camera, stream: EspStream, plan: SetPlan, mvc_above_rest_mv: floa
                            flashes=flashes)
 
 
+# Time:  O(R * C) for R rows of C columns.  Space: O(1) extra (rows stream to disk).
+# Data structures: a list of row tuples; a csv.writer.
 def _write_csv(path: Path, header: list[str], rows: list) -> None:
     """Write one CSV file."""
     with path.open("w", newline="") as out:

@@ -21,6 +21,12 @@ Finding the LED without being told where it is (two passes over the video):
 Frame times come from Ahmad's iter_video_frames (src/myomotion/vision/video_input.py), which reads them
 from the video file itself: correct for phone video with an uneven frame rate, and exactly the times his
 pose pipeline uses, so the LED and the pose share one clock.
+
+Data structures (this file): NumPy uint8 / float32 arrays (frames x grid blocks, frames x box pixels); shifted array
+    views for the pulse search; lists of (frame, size) tuples and LedFlash dataclasses; a LedTrace dataclass of per-
+    frame arrays.
+Time complexity (this file): two decodes of the video, O(T * P) each for T frames of P pixels (decoding dominates);
+    pulse scoring O(T * B * K) for B grid blocks and K allowed on-times; flash timing O(T).
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -37,6 +43,7 @@ from myomotion.vision.video_input import iter_video_frames
 # LedConfig  (the CONFIG for this file)
 # What:  every tunable number of the LED search, in one place.
 # Data structures: a frozen dataclass (named, typed, cannot change by accident).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LedConfig:
@@ -60,6 +67,8 @@ class LedConfig:
 LED_CONFIG = LedConfig()
 
 
+# Time:  O(1) (an exception type).
+# Data structures: a subclass of ValueError carrying the message.
 class LedNotFound(ValueError):
     """The video does not show the expected flashes (the message says what to check)."""
 
@@ -68,6 +77,7 @@ class LedNotFound(ValueError):
 # LedFlash
 # What:  one flash found in the video.
 # Data structures: a frozen dataclass (a found flash never changes).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LedFlash:
@@ -85,6 +95,7 @@ class LedFlash:
 #        picture.
 # Data structures: dataclass holding NumPy arrays (one value per frame, parallel to
 #        times_s) and a list of LedFlash in time order.
+# Time:  O(1) to build (references to the arrays); frame_interval_s is O(T).
 # ---------------------------------------------------------------------------
 @dataclass
 class LedTrace:
@@ -97,6 +108,8 @@ class LedTrace:
     flashes: list[LedFlash]
     snapshot: np.ndarray | None = field(default=None, repr=False)   # BGR frame during the first flash
 
+    # Time:  O(T) for T frames (median of the steps).  Space: O(T).
+    # Data structures: the NumPy array of frame times.
     @property
     def frame_interval_s(self) -> float:
         """Typical time between frames (1 / frame rate)."""

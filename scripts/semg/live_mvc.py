@@ -13,6 +13,11 @@ window toolkit it falls back to a text bar in the terminal (for the window on th
 
 Thin command-line wrapper: the logic lives in src/myomotion/semg/acquisition.py (reading the
 ESP32) and src/myomotion/semg/live.py (filter, envelope, %MVC).
+
+Data structures (this file): a LivePercentMvc (filter chain and deque ring buffer); two deques as ring buffers for
+    the plot; LiveReading dataclasses.
+Time complexity (this file): O(S) per sample (S = 6 filter sections, O(1) RMS); O(n) per redraw for the n plotted
+    points.
 """
 
 from __future__ import annotations
@@ -99,10 +104,13 @@ def gui_available() -> bool:
 # What:  one terminal line, redrawn in place: the stage while starting up, then a
 #        bar of '#' (bar_width characters = 100% MVC) and the number.
 # Data structures: none beyond the settings dict.
+# Time:  O(1) per update (one printed line).  Space: O(1).
 # ---------------------------------------------------------------------------
 class TextDisplay:
     """Live %MVC as a text bar in the terminal."""
 
+    # Time:  O(1) (nothing is stored).  Space: O(1).
+    # Data structures: none.
     def add(self, t_us: int, reading: LiveReading) -> None:
         """Nothing to store for the text display."""
 
@@ -124,10 +132,14 @@ class TextDisplay:
         sys.stdout.write("\r" + line.ljust(DISPLAY_CONFIG["bar_width"] + 30))
         sys.stdout.flush()
 
+    # Time:  O(1).
+    # Data structures: a bool.
     def closed(self) -> bool:
         """The terminal display is only closed by Ctrl+C."""
         return False
 
+    # Time:  O(1).
+    # Data structures: none.
     def close(self) -> None:
         """End the line so the shell prompt starts on a new one."""
         print()
@@ -141,6 +153,7 @@ class TextDisplay:
 #        and %MVC): appending past the limit drops the oldest point in O(1), so the
 #        graph always shows the latest window_s seconds.
 # Files used: none (matplotlib draws on screen).
+# Time:  O(1) per add; O(n) per redraw for the n points in the window.  Space: O(n).
 # ---------------------------------------------------------------------------
 class PlotDisplay:
     """Live %MVC graph and bar in a window."""
@@ -215,10 +228,14 @@ class PlotDisplay:
         self.fig.canvas.draw_idle()
         self.plt.pause(0.001)                            # > lets the window process events and repaint
 
+    # Time:  O(1).
+    # Data structures: a lookup in matplotlib's list of open figures.
     def closed(self) -> bool:
         """True once the user has closed the window."""
         return not self.plt.fignum_exists(self.fig.number)
 
+    # Time:  O(1).
+    # Data structures: the matplotlib figure.
     def close(self) -> None:
         """Close the window."""
         self.plt.close(self.fig)

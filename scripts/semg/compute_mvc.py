@@ -8,6 +8,10 @@ The folder comes from:  python record_session.py --board esp32 --participant TES
 Thin command-line wrapper: the logic lives in src/myomotion/semg/mvc.py.
 Writes mvc.json (the numbers) and mvc.png (envelope, pushes, best 1-second windows) into the folder.
 Exit code 0 = TC02 passed, 1 = failed.
+
+Data structures (this file): a Recording, an MvcResult dataclass, a dict for mvc.json, a matplotlib figure.
+Time complexity (this file): O(N * S) for the envelope (N samples, S = 6 filter sections), O(N) for the push windows
+    and the plot.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ PLOT_CONFIG = {"figure_size": (12, 4.5), "dpi": 150, "push_colour": "#bbf7d0", "
 # ---------------------------------------------------------------------------
 def format_result(result: MvcResult, cfg: MvcConfig = MVC_CONFIG) -> str:
     """PASS/FAIL per TC02 check, with the numbers."""
+    # Time:  O(1).  Space: O(1).
+    # Data structures: a bool in, a str out.
     def verdict(ok: bool) -> str:
         return "PASS" if ok else "FAIL"
 

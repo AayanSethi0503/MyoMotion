@@ -16,6 +16,12 @@ TC02 passes when all pushes were recorded, each is clearly a real contraction, t
 agree (a big gap means one push was not maximal: redo the session), and no push reached the
 ESP32's ceiling (a clipped push would make the MVC too small and every %MVC too big).
 Subtracting the rest level makes a relaxed muscle read about 0% instead of the noise floor.
+
+Data structures (this file): NumPy arrays for the envelope; lists of (start, end) push windows; MvcResult, PhaseStat
+    and NormalisedSet dataclasses; a dict for mvc.json; a list of Paths sorted by time (find_latest_mvc).
+Time complexity (this file): O(N * S) for the envelope (N samples, S = 6 filter sections); O(n) per push window
+    (moving average); O(N * P) for the per-phase summary of P phase windows; O(F log F) to find the newest passed
+    MVC among F folders.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -39,6 +45,7 @@ PERCENT = 100.0                       # %MVC is a percentage
 # What:  every setting of the MVC measurement in one place.
 # Data structures: a frozen dataclass (named, typed, cannot change by accident).
 # Values marked "provisional" are starting guesses to tune on real sessions.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MvcConfig:
@@ -64,6 +71,7 @@ MVC_CONFIG = MvcConfig()
 #        MVC itself and the three TC02 verdicts.
 # Data structures: a dataclass; per-push numbers are lists (one entry per push,
 #        in order); `passed` is a computed property.
+# Time:  O(T) to build for the T pushes (per-push lists); passed is O(1).
 # ---------------------------------------------------------------------------
 @dataclass
 class MvcResult:
@@ -82,6 +90,8 @@ class MvcResult:
     consistency_ok: bool             # best two within max_best_two_gap
     clipping_ok: bool                # no push reached the ceiling
 
+    # Time:  O(1).
+    # Data structures: four bools combined with `and`.
     @property
     def passed(self) -> bool:
         """TC02 passes when all four checks pass."""
@@ -93,6 +103,7 @@ class MvcResult:
 # What:  %MVC summary of one phase of one rep: the project's "activation per rep
 #        phase" in its simplest form.
 # Data structures: a frozen dataclass (a finished measurement does not change).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PhaseStat:
@@ -265,6 +276,7 @@ def phase_summary(t_us: np.ndarray, percent: np.ndarray, cues: list[Cue]) -> lis
 # What:  one exercise set converted to %MVC: the time series (this is the measured
 #        Y(t) the models will learn from) and the per-phase summary.
 # Data structures: dataclass with NumPy arrays and a list of PhaseStat.
+# Time:  O(1) to build (it holds references to the arrays, no copies).
 # ---------------------------------------------------------------------------
 @dataclass
 class NormalisedSet:
@@ -314,6 +326,8 @@ def save_mvc(result: MvcResult, folder: Path, details: dict) -> Path:
     return out_path
 
 
+# Time:  O(m) for an m-byte mvc.json.  Space: O(m).
+# Data structures: a dict parsed from JSON.
 def load_mvc(path: Path) -> dict:
     """Read mvc.json (give the file or the folder that holds it)."""
     json_path = path / "mvc.json" if path.is_dir() else path

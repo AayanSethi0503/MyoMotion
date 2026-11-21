@@ -12,6 +12,11 @@ RDL rep is the hip angle closing and opening again, with the shared state machin
 
 The zones are the ones of his segmenter (set-up 130/140, lockout 160/150), on the same angle (hip_signed_deg).
 Each rep also records the trunk lean, the spine angles and the back flags his rules raised during it.
+
+Data structures (this file): Ahmad's FrameResult in; the AngleCycle state machine; a set of form-flag names per rep;
+    RdlFrame dataclasses; dict rep records.
+Time complexity (this file): O(1) per frame for the state machine plus O(F) for the F active form flags; drawing the
+    HUD is O(P) for the patch's P pixels.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -36,6 +41,7 @@ PHASE_LABELS = {REST: "Standing", ECCENTRIC: "Lower", HOLD: "Hold", CONCENTRIC: 
 # RdlConfig  (the CONFIG for this file)
 # What:  the hip-angle zones and timing of an RDL rep.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RdlConfig:
@@ -59,6 +65,7 @@ RDL_CONFIG = RdlConfig()
 # What:  one frame: Ahmad's full FrameResult (angles, spine, cues; drawn by his overlay)
 #        plus the RDL phase and rep count.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RdlFrame:
@@ -83,6 +90,8 @@ class RdlFrame:
 class RdlCounter:
     """RDL reps from Ahmad's per-frame deadlift analysis."""
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: an AngleCycle; a set of flag names.
     def __init__(self, cfg: RdlConfig = RDL_CONFIG) -> None:
         self.cfg = cfg
         self.cycle = AngleCycle(CycleConfig(open_enter_deg=cfg.stand_enter_deg, open_exit_deg=cfg.stand_exit_deg,
@@ -93,6 +102,8 @@ class RdlCounter:
         self._last_seen: float | None = None
         self._flags: set[str] = set()
 
+    # Time:  O(1) per frame (one state-machine step) plus O(F) for the F active form flags.  Space: O(F).
+    # Data structures: Ahmad's FrameResult in; the running rep dict; a set of flag names (O(1) add); an RdlFrame out.
     def update(self, t_s: float, result: FrameResult) -> RdlFrame:
         """One frame of Ahmad's analysis -> the RDL phase and count."""
         angles = result.angles
@@ -114,6 +125,8 @@ class RdlCounter:
             self.cycle.reps[-1]["back_flags"] = sorted(self._flags)
         return RdlFrame(t_s, result, self.cycle.phase, self.cycle.rep_count, hip)
 
+    # Time:  O(F) for the F active flags.  Space: O(F).
+    # Data structures: the rep dict; a set of flag names, sorted into a list.
     def _track_back(self, rep: dict[str, Any], result: FrameResult) -> None:
         """Deepest trunk lean, largest spine angles and back flags during the rep."""
         angles = result.angles

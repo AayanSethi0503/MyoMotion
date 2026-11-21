@@ -13,6 +13,11 @@ arrives. Only Python's standard library is used (socket), so no extra package is
 The encrypted firmware (hardware/myomotion_emg_secure) seals the same lines with AES-GCM and adds
 homomorphic P lines: give EspStream the keys and it decrypts first (src/myomotion/semg/secure_link.py),
 so everything after it works unchanged.
+
+Data structures (this file): a bytes buffer for an unfinished line; EmgSample and BoardEvent dataclasses; lists of
+    samples and events; a TCP socket; a SecureFrameDecoder when the link is encrypted.
+Time complexity (this file): O(b) per read for b received bytes (every line split and parsed once); O(1) per sample
+    for the 32-bit clock unwrap.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -30,6 +35,7 @@ SYNC_COMMAND = b"S"                   # the firmware flashes the sync LED and an
 # AcquisitionConfig  (the CONFIG for this file)
 # What:  where the ESP32 is and how to read from it.
 # Data structures: a frozen dataclass (named, typed, cannot change by accident).
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AcquisitionConfig:
@@ -50,6 +56,7 @@ ACQUISITION_CONFIG = AcquisitionConfig()
 # What:  one sample from the ESP32: its clock and the millivolts of every channel.
 # Data structures: a frozen dataclass; the channel values are a tuple because a
 #        sample never changes and the number of channels is fixed per line.
+# Time:  O(1) to build (an int and a tuple of 3 floats).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class EmgSample:
@@ -94,6 +101,8 @@ class BoardEvent:
     name: str
 
 
+# Time:  O(c) for the c comma-separated fields (3).  Space: O(c).
+# Data structures: str.split gives a list of fields; a BoardEvent dataclass (or None) out.
 def parse_event(text: str) -> BoardEvent | None:
     """Parse 'E,t_us,NAME'; None for anything else."""
     fields = text.split(",")
@@ -115,6 +124,7 @@ def parse_event(text: str) -> BoardEvent | None:
 #        `events` for whoever needs them (the synced recorder).
 # Data structures: a bytes buffer for the unfinished line; ints for the counters; a list
 #        of BoardEvents (the caller empties it).
+# Time:  O(b) per feed() for b received bytes.  Space: O(b).
 # ---------------------------------------------------------------------------
 @dataclass
 class LineParser:
@@ -175,6 +185,7 @@ class LineParser:
 #        the homomorphic P lines of the latest read are kept in last_he_samples.
 # Data structures: a socket and a LineParser (+ a SecureFrameDecoder when encrypted).
 # Files used: none (network only); src/myomotion/semg/secure_link.py when encrypted.
+# Time:  O(b) per read() for b received bytes.  Space: O(b).
 # ---------------------------------------------------------------------------
 class EspStream:
     """Live sample source: the ESP32's Wi-Fi TCP stream (plain or encrypted)."""
@@ -236,12 +247,18 @@ class EspStream:
         """Send the sync command."""
         self.sock.sendall(SYNC_COMMAND)
 
+    # Time:  O(1).
+    # Data structures: the TCP socket.
     def close(self) -> None:
         """Close the connection."""
         self.sock.close()
 
+    # Time:  O(1).
+    # Data structures: returns itself (context manager: `with EspStream(...) as s:`).
     def __enter__(self) -> EspStream:
         return self
 
+    # Time:  O(1).
+    # Data structures: closes the socket on leaving the `with` block.
     def __exit__(self, *exc_info: object) -> None:
         self.close()

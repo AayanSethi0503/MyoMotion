@@ -29,6 +29,12 @@ Keys: two random 128-bit keys made by scripts/semg/make_link_keys.py, stored out
 ~/.config/myomotion/keys.json; firmware: hardware/myomotion_emg_secure/secrets.h, git-ignored).
 AES itself comes from the `cryptography` package on the laptop and from the ESP32's hardware: encryption
 primitives must never be home-made. Everything built on top of AES here is our own code.
+
+Data structures (this file): a LinkKeys dataclass of bytes; NumPy uint64 arrays for keystreams, ciphertexts and
+    window sums (arithmetic wraps modulo 2^64 by itself); a deque ring buffer (HeAggregator); a bytes buffer and int
+    counters (SecureFrameDecoder); AES-ECB and AES-GCM objects from the cryptography library (never home-made).
+Time complexity (this file): O(N * C) for N samples and C channels (one AES block per sample and channel; sliding
+    window sums from one cumulative sum); O(C) per sample when live; O(m) per sealed batch of m bytes.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -61,6 +67,7 @@ CHANNELS = 3
 # SecureConfig  (the CONFIG for this file; the firmware has the same numbers)
 # What:  protocol constants shared by the ESP32 and the laptop.
 # Data structures: a frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SecureConfig:
@@ -77,6 +84,8 @@ class SecureConfig:
 SECURE_CONFIG = SecureConfig()
 
 
+# Time:  O(1) (an exception type).
+# Data structures: a subclass of ValueError carrying the message.
 class KeyMismatch(ValueError):
     """The ESP32 and the laptop hold different keys."""
 
@@ -86,6 +95,7 @@ class KeyMismatch(ValueError):
 # What:  the two secret keys and their public fingerprint (key id). The id lets the
 #        ESP32 and the laptop check they hold the same keys without revealing them.
 # Data structures: frozen dataclass of bytes.
+# Time:  O(1) to build (two 16-byte keys).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LinkKeys:
@@ -94,6 +104,8 @@ class LinkKeys:
     link_key: bytes
     he_key: bytes
 
+    # Time:  O(k) for the k = 32 key bytes (one SHA-256).  Space: O(1).
+    # Data structures: bytes in; the first 4 digest bytes as a hex str out.
     @property
     def key_id(self) -> str:
         """First 4 bytes of SHA-256 over both keys, as hex (safe to show)."""
@@ -112,6 +124,8 @@ def make_keys() -> LinkKeys:
     return LinkKeys(link_key=secrets.token_bytes(KEY_BYTES), he_key=secrets.token_bytes(KEY_BYTES))
 
 
+# Time:  O(1) (two 16-byte keys).  Space: O(1).
+# Data structures: dict -> JSON, written through an OS file descriptor opened with permission 600.
 def save_keys(keys: LinkKeys, path: Path) -> Path:
     """Write the key file (permission 600)."""
     path = Path(path).expanduser()
@@ -124,6 +138,8 @@ def save_keys(keys: LinkKeys, path: Path) -> Path:
     return path
 
 
+# Time:  O(1).  Space: O(1).
+# Data structures: dict from JSON; a LinkKeys dataclass of bytes out.
 def load_keys(path: Path = SECURE_CONFIG.key_file) -> LinkKeys:
     """Read the key file."""
     path = Path(path).expanduser()
@@ -188,6 +204,7 @@ def he_keys(he_key: bytes, session: bytes, first_n: int, count: int, channels: i
 # HeSample
 # What:  one P line: sample number, ESP32 time and one ciphertext per channel.
 # Data structures: frozen dataclass; ciphertexts as a tuple of ints.
+# Time:  O(C) to build for C channels.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class HeSample:
@@ -215,6 +232,8 @@ def parse_he_line(text: str) -> HeSample | None:
         return None
 
 
+# Time:  O(C) for C channels.  Space: O(C).
+# Data structures: a tuple/list of ints in; one text line out (16 hex digits per ciphertext).
 def format_he_line(n: int, t_us: int, ciphertexts: tuple[int, ...] | list[int]) -> str:
     """The P line for one sample."""
     return f"P,{n},{t_us}," + ",".join(f"{c:016x}" for c in ciphertexts) + "\n"
@@ -225,6 +244,7 @@ def format_he_line(n: int, t_us: int, ciphertexts: tuple[int, ...] | list[int]) 
 # What:  what the aggregator hands to the key holder: an encrypted window sum per
 #        channel and which samples it covers.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (C window sums).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class HeWindow:
@@ -235,6 +255,8 @@ class HeWindow:
     t_us: int                         # time of the newest sample in the window
     sums: tuple[int, ...]             # one encrypted sum per channel
 
+    # Time:  O(1).
+    # Data structures: ints.
     @property
     def count(self) -> int:
         """How many samples the sums cover."""
@@ -261,11 +283,16 @@ class HeAggregator:
     buffer: deque = field(init=False)
     sums: list[int] = field(init=False)
 
+    # Time:  O(C).  Space: O(window * C).
+    # Data structures: deque(maxlen=window) ring buffer; a list of C running sums.
     def __post_init__(self) -> None:
         """Empty ring buffer and zero sums."""
         self.buffer = deque(maxlen=self.window)
         self.sums = [0] * self.channels
 
+    # Time:  O(C) per sample: subtract the oldest and add the newest ciphertext (mod 2^64), no re-summing of the
+    #        window.  Space: O(1) extra.
+    # Data structures: the deque ring buffer; the list of running sums; a HeWindow dataclass out.
     def add(self, sample: HeSample) -> HeWindow | None:
         """Add one sample; return the window sums once the window is full."""
         if self.buffer and sample.n != self.buffer[-1].n + 1:   # > missing samples: start a new window
@@ -298,12 +325,16 @@ class HeDecryptor:
     channels: int = CHANNELS
     cfg: SecureConfig = SECURE_CONFIG
 
+    # Time:  O(n * C) keystream blocks for the n samples of the window.  Space: O(n * C).
+    # Data structures: NumPy uint64 key array summed with wrap-around; a list of ints out.
     def power_sums(self, window: HeWindow) -> list[int]:
         """sum(p) per channel (whole numbers of thousandths of mV^2)."""
         keys = he_keys(self.he_key, self.session, window.first_n, window.count, self.channels)
         key_sums = keys.sum(axis=0, dtype=np.uint64)            # > uint64: wraps modulo 2^64 by itself
         return [(window.sums[c] - int(key_sums[c])) % HE_MODULUS for c in range(self.channels)]
 
+    # Time:  O(n * C) via power_sums, plus C square roots.  Space: O(C).
+    # Data structures: a list of floats.
     def envelope_mv(self, window: HeWindow) -> list[float]:
         """RMS envelope (mV) of each channel over the window."""
         return [math.sqrt(total / self.cfg.power_scale / window.count) for total in self.power_sums(window)]
@@ -326,11 +357,15 @@ def sliding_sums_u64(values: np.ndarray, window: int) -> np.ndarray:
         return cumulative[window - 1:] - shifted[:len(cumulative) - window + 1]
 
 
+# Time:  O(N * C) (sliding sums from a cumulative sum).  Space: O(N * C).
+# Data structures: NumPy uint64 arrays (sums wrap modulo 2^64 by themselves).
 def aggregate_windows(ciphertexts: np.ndarray, window: int = SECURE_CONFIG.window) -> np.ndarray:
     """Encrypted window sums (N - window + 1 rows): no key needed."""
     return sliding_sums_u64(ciphertexts, window)
 
 
+# Time:  O(N * C): one keystream block per sample and channel, then sliding sums.  Space: O(N * C).
+# Data structures: NumPy uint64 and float64 arrays.
 def decrypt_windows(encrypted_sums: np.ndarray, he_key: bytes, session: bytes, first_n: int, total: int,
                     window: int = SECURE_CONFIG.window, cfg: SecureConfig = SECURE_CONFIG) -> np.ndarray:
     """RMS envelope (mV) for every full window of samples first_n .. first_n+total-1."""
@@ -382,10 +417,14 @@ class SecureFrameDecoder:
     _last_counter: int = field(default=-1, repr=False)
     _pending: bytes = field(default=b"", repr=False)
 
+    # Time:  O(1).
+    # Data structures: an AESGCM object holding the link key.
     def __post_init__(self) -> None:
         """AES-GCM with the link key."""
         self._aead = AESGCM(self.keys.link_key)
 
+    # Time:  O(b) for b received bytes (split once, every line opened once).  Space: O(b).
+    # Data structures: a bytes buffer for the unfinished line; a list of byte lines; a list of decrypted batches.
     def feed(self, chunk: bytes) -> bytes:
         """Add received bytes; return the decrypted text of every complete, valid batch."""
         lines = (self._pending + chunk).split(b"\n")
@@ -403,6 +442,8 @@ class SecureFrameDecoder:
                 self.plain_lines_ignored += 1
         return b"".join(opened)
 
+    # Time:  O(1) (4 fields).  Space: O(1).
+    # Data structures: str.split list; the session id as bytes.
     def _hello(self, text: str) -> None:
         """New session: remember its nonce prefix and check the key id."""
         fields = text.split(",")
@@ -416,6 +457,8 @@ class SecureFrameDecoder:
             self.session = session
             self._last_counter = -1
 
+    # Time:  O(m) for an m-byte batch (base64 decode + AES-GCM).  Space: O(m).
+    # Data structures: bytes; an int counter for the replay check.
     def _open(self, line: bytes) -> bytes | None:
         """Verify and decrypt one X line; None (and counted) if it is not genuine."""
         try:
@@ -479,16 +522,22 @@ class ReferenceEncoder:
     sample_number: int = 0
     frame_counter: int = 0
 
+    # Time:  O(C * S) to build C filter chains of S sections.  Space: O(C * S).
+    # Data structures: a list of EmgFilter; an AESGCM object.
     def __post_init__(self) -> None:
         """Filters (primed on the first sample) and the two AES objects."""
         self.filters = [EmgFilter(self.cfg.rate_hz) for _ in range(CHANNELS)]
         self.primed = False
         self._aead = AESGCM(self.keys.link_key)
 
+    # Time:  O(1).
+    # Data structures: a str encoded to bytes.
     def hello(self) -> bytes:
         """The clear-text hello line."""
         return f"H,{self.session.hex()},{self.keys.key_id},{self.cfg.version}\n".encode()
 
+    # Time:  O(C * S) per sample: filter, square and encrypt each of the C channels.  Space: O(C).
+    # Data structures: a list of ciphertext ints; two text lines out.
     def sample_lines(self, t_us: int, values_mv: tuple[float, ...]) -> str:
         """D line + P line for one sample (filter -> square -> encrypt)."""
         if not self.primed:
@@ -505,6 +554,8 @@ class ReferenceEncoder:
         self.sample_number += 1
         return d_line + p_line
 
+    # Time:  O(m) for an m-byte text (AES-GCM + base64).  Space: O(m).
+    # Data structures: bytes; one X line out.
     def seal(self, text: str) -> bytes:
         """One X line: AES-GCM over the text, counter in the nonce."""
         nonce = self.session + self.frame_counter.to_bytes(4, "big")

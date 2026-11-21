@@ -18,6 +18,11 @@ counted, with the cue "Lower your arm all the way" when the arm stayed bent belo
 The rep state machine is shared with the RDL (src/myomotion/sync/angle_cycle.py: hysteresis, dwell, turning points,
 stall). Form cues: the upper arm swinging forward ("keep your elbow at your side") and the trunk swinging
 ("don't swing your body"), both against the person's own rest posture.
+
+Data structures (this file): a dict joint -> 2-D NumPy point; the AngleCycle state machine; Ahmad's OneEuroFilter;
+    CurlFrame dataclasses; dict rep records; a dict column -> text per CSV row.
+Time complexity (this file): O(1) per frame for the arm choice, the elbow angle, the cues and the state machine;
+    O(P) per frame to draw the overlay panel (P pixels).
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -49,6 +54,7 @@ DISCLAIMERS = ["Angle thresholds are provisional (not validated on labelled curl
 # CurlConfig  (the CONFIG for this file)
 # What:  every threshold of the curl tracker.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CurlConfig:
@@ -79,6 +85,7 @@ CURL_CONFIG = CurlConfig()
 # CurlFrame
 # What:  what the tracker says about one frame (for the overlay and cv_frames.csv).
 # Data structures: frozen dataclass; arm points as a dict name -> (x, y) pixels.
+# Time:  O(1) to build (references to the landmark array and a 4-entry dict).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CurlFrame:
@@ -110,6 +117,8 @@ class CurlFrame:
 class CurlAnalyzer:
     """Biceps curl reps and phases from MediaPipe landmarks."""
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: an AngleCycle, a OneEuroFilter, floats.
     def __init__(self, cfg: CurlConfig = CURL_CONFIG, side: str | None = None) -> None:
         self.cfg = cfg
         self.side = side
@@ -127,21 +136,29 @@ class CurlAnalyzer:
         self.t_first: float | None = None
         self.t_last: float | None = None
 
+    # Time:  O(1).
+    # Data structures: a str.
     @property
     def phase(self) -> str:
         """Current phase (our names)."""
         return self.cycle.phase
 
+    # Time:  O(1).
+    # Data structures: an int.
     @property
     def rep_count(self) -> int:
         """Reps finished so far."""
         return self.cycle.rep_count
 
+    # Time:  O(1) (returned by reference, not copied).
+    # Data structures: the list of rep dicts.
     @property
     def reps(self) -> list[dict[str, Any]]:
         """One record per finished rep."""
         return self.cycle.reps
 
+    # Time:  O(1) (returned by reference).
+    # Data structures: the list of transition dicts.
     @property
     def transitions(self) -> list[dict[str, Any]]:
         """Every phase change {t_s, from, to}."""
@@ -151,6 +168,8 @@ class CurlAnalyzer:
     # process(t_s, lm)
     # What:  one frame: lm = MediaPipe image landmarks [33, 3] (x_px, y_px, visibility) or None.
     # Time / Space: O(1).
+    # Data structures: a dict joint -> 2-D NumPy point for the arm (O(1) lookups); the running rep dict; a CurlFrame
+    #                  dataclass out.
     # -----------------------------------------------------------------------
     def process(self, t_s: float, lm: np.ndarray | None) -> CurlFrame:
         """Analyse one frame."""
@@ -190,6 +209,7 @@ class CurlAnalyzer:
     # What:  the shoulder, elbow, wrist (and hip if seen) of the arm the camera sees best.
     #        The other arm takes over only when it is clearly more visible (no flicker).
     # Time / Space: O(1).
+    # Data structures: a dict side -> visibility score; a dict joint -> NumPy point.
     # -----------------------------------------------------------------------
     def _arm(self, lm: np.ndarray | None) -> dict[str, np.ndarray] | None:
         """Arm points in pixels, or None if the arm is not visible enough."""
@@ -212,6 +232,7 @@ class CurlAnalyzer:
     # _cues(upper_arm, swing)
     # What:  the form cues active now (only during a rep), kept in the rep's record too.
     # Time / Space: O(1).
+    # Data structures: a list of cue strings (returned as a tuple); the running rep dict.
     # -----------------------------------------------------------------------
     def _cues(self, upper_arm: float | None, swing: float | None) -> tuple[str, ...]:
         """Active form cues."""
@@ -248,6 +269,8 @@ class CurlAnalyzer:
                 "config": asdict(self.cfg), "disclaimers": DISCLAIMERS}
 
 
+# Time:  O(1).  Space: O(1).
+# Data structures: a dict update on the finished rep record.
 def _add_curl_keys(rep: dict[str, Any]) -> None:
     """The curl's names for a finished rep's times and angles (concentric first, like the deadlift)."""
     rep.update({"t_concentric_start_s": rep["t_start_s"], "t_lockout_s": rep["t_turn_s"],
@@ -257,6 +280,8 @@ def _add_curl_keys(rep: dict[str, Any]) -> None:
                 "eccentric_s": rep["t_end_s"] - rep["t_return_s"]})
 
 
+# Time:  O(1).  Space: O(1).
+# Data structures: two 2-D NumPy points in, a float out.
 def _lean_from_vertical(hip: np.ndarray, shoulder: np.ndarray) -> float:
     """Unsigned angle of hip->shoulder from straight up, degrees (image y points down)."""
     dx, dy = float(shoulder[0] - hip[0]), float(hip[1] - shoulder[1])
@@ -272,8 +297,12 @@ CURL_COLUMNS = ("frame", "t_s", "person", "tracked", "side", "phase", "phase_lab
                 "upper_arm_deg", "trunk_swing_deg", "cues", "process_ms")
 
 
+# Time:  O(K) for the K = 13 columns.  Space: O(K).
+# Data structures: a dict column -> text; nested helper number().
 def curl_row(frame: int, t_s: float, result: CurlFrame, process_ms: float) -> dict[str, str]:
     """One row of cv_frames.csv for the curl."""
+    # Time:  O(1).
+    # Data structures: a float (or None) in, a str out.
     def number(value: float | None) -> str:
         return "" if value is None or not math.isfinite(value) else f"{value:.2f}"
 
@@ -297,6 +326,9 @@ PHASE_COLOURS = {REST: (170, 170, 170), CONCENTRIC: (224, 79, 31), HOLD: (222, 2
 CUE_COLOUR = (36, 165, 245)            # > #F5A524 warning amber, BGR
 
 
+# Time:  O(P) for the P pixels of the translucent panel (cv2.addWeighted), plus a fixed number of shapes.  Space:
+#        O(P).
+# Data structures: a NumPy image drawn in place; a dict name -> (x, y) pixel point.
 def draw_curl(frame: np.ndarray, result: CurlFrame, analyzer: CurlAnalyzer) -> np.ndarray:
     """Curl overlay, drawn in place; returns the frame."""
     import cv2

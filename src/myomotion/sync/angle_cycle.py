@@ -12,6 +12,11 @@ phase is causal (it lags a little); in each rep's record the start is moved back
 its open turning point, and the start of the opening to the last moment at its closed turning point, so the phases
 in merged.csv match the movement. A rep may only start after the joint has been open once (no counting from a bent
 start), and one that stays in a phase longer than stall_s is dropped (e.g. a joint simply held bent).
+
+Data structures (this file): a dict key -> start time for the dwell timers; (angle, time) tuples for the two turning
+    points; a dict per rep record (with a list of phase dicts); lists of reps and phase changes.
+Time complexity (this file): O(1) per angle sample (a constant number of comparisons and dict updates); O(R + T)
+    memory for R reps and T phase changes.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -27,6 +32,7 @@ STARTED, FINISHED, DROPPED = "started", "finished", "dropped"
 # CycleConfig
 # What:  the angles and times of one exercise's cycle (each tracker builds its own).
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CycleConfig:
@@ -54,6 +60,8 @@ class CycleConfig:
 class AngleCycle:
     """Rep counting on one joint angle that closes and opens again."""
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: empty lists (reps, transitions), a dict of dwell timers, (angle, t) tuples.
     def __init__(self, cfg: CycleConfig, closing_phase: str, opening_phase: str) -> None:
         self.cfg = cfg
         self.closing_phase, self.opening_phase = closing_phase, opening_phase
@@ -72,6 +80,8 @@ class AngleCycle:
     # step(t, angle)
     # What:  advance the machine by one smoothed angle at time t.
     # Time / Space: O(1).
+    # Data structures: a dict key -> start time (dwell timers, O(1) lookups); (angle, t) tuples for the turning
+    #                  points; a dict for the running rep record.
     # -----------------------------------------------------------------------
     def step(self, t: float, angle: float) -> str | None:
         """One angle; returns STARTED, FINISHED, DROPPED or None."""
@@ -116,6 +126,8 @@ class AngleCycle:
             self.current["turn_angle_deg"] = min(self.current["turn_angle_deg"], angle)
         return event
 
+    # Time:  O(1).
+    # Data structures: resets the rep dict and the turning-point tuples.
     def drop(self, t: float) -> None:
         """Forget an unfinished rep (stalled, went back, or the joint was lost); re-arm on the next open position."""
         self.current, self._open_turn, self._closed_turn = None, None, None
@@ -123,6 +135,8 @@ class AngleCycle:
         if self.phase != REST:
             self._enter(REST, t)
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: a dict key -> start time (O(1) lookup and update).
     def _sustained(self, key: str, condition: bool, t: float) -> float | None:
         """Start time of a condition that has lasted dwell_s, else None (the start time adds no dwell lag)."""
         if not condition:
@@ -133,6 +147,8 @@ class AngleCycle:
             self._since[key] = start = t
         return start if t - start >= self.cfg.dwell_s else None
 
+    # Time:  O(1) amortised (one list append; clears a dict of at most 4 timers).
+    # Data structures: the list of transition dicts; the dwell-timer dict.
     def _enter(self, phase: str, t: float) -> None:
         """Change phase and log it."""
         self.transitions.append({"t_s": t, "from": self.phase, "to": phase})
@@ -145,6 +161,7 @@ class AngleCycle:
     # What:  close the rep: its three phases with start and end times ("phases", read by
     #        src/myomotion/sync/align.py intervals_from_cv in any exercise's order).
     # Time / Space: O(1).
+    # Data structures: the rep dict gains a list of three phase dicts and is appended to the reps list.
     # -----------------------------------------------------------------------
     def _finish(self, t_end: float) -> None:
         """Store the finished rep."""

@@ -8,6 +8,11 @@ Thin command-line wrapper only: the logic lives in src/myomotion/semg/quality.py
 and src/myomotion/semg/dsp.py (filters and envelope).
 Writes quality.json (the numbers) and quality.png (raw / cleaned / envelope) into the folder.
 Exit code 0 = TC01 passed, 1 = failed.
+
+Data structures (this file): a Recording (NumPy arrays and cues), a QualityReport dataclass, a dict for
+    quality.json, a matplotlib figure.
+Time complexity (this file): as check_quality in quality.py: O(N + R^2 + A^2), dominated by the direct DFTs; O(N)
+    more to plot.
 """
 
 from __future__ import annotations

@@ -21,6 +21,12 @@ Outputs, written into <folder>:
   merged.csv   frame, t_video_s, t_esp32_us, envelope_mv, percent_mvc, phase, rep [, cv_* columns]
                = X(t) and Y(t) side by side, one row per video frame (the dataset row format)
   sync.json    the method, the clock line, every flash on both clocks, the TC03 result, the per-phase %MVC
+
+Data structures (this file): a SyncResult dataclass (NumPy arrays per sample and per frame, lists of intervals and
+    statistics); a dict ms -> CV row for O(1) joins; a csv.writer; nested dicts and lists for sync.json.
+Time complexity (this file): the LED search decodes the video (O(T * P)) and the envelope costs O(N * S) (N samples,
+    S = 6 filter sections); the laptop-clock sync is O(N + F); merging is O(N + F) (two pointers) and writing
+    merged.csv O(F * C) for C columns.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -61,6 +67,7 @@ NOTES = (
 # SyncResult
 # What:  everything one sync run produced, for the script's printout and plot.
 # Data structures: dataclass of NumPy arrays (per sample / per frame) and lists.
+# Time:  O(1) to build (references to the arrays, no copies).
 # ---------------------------------------------------------------------------
 @dataclass
 class SyncResult:

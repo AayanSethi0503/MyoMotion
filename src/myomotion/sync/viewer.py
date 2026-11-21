@@ -5,6 +5,11 @@ else the plain video. Right: a panel from merged.csv for the SAME frame: the pha
 the rep, the %MVC (or envelope in mV) as a bar and a number, and the last few seconds as a trace.
 So anyone can see the two pipelines line up: the bar rises as the pull starts (about 50-100 ms before the
 movement is visible: electromechanical delay).
+
+Data structures (this file): a MergedRows dataclass of NumPy arrays; a slice of the value array per trace; NumPy
+    images; a cv2.VideoCapture and cv2.VideoWriter.
+Time complexity (this file): O(F) to load merged.csv; O(F * (P + K)) to render F frames with a P-pixel panel and K
+    trace points each (the trace window is found by binary search, O(log F)).
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -25,6 +30,7 @@ SYNCED_VIDEO_NAME = "synced_view.mp4"
 # ViewerConfig
 # What:  panel size, colours (BGR, from the team's UI design board) and scales.
 # Data structures: frozen dataclass; dict phase -> colour.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ViewerConfig:
@@ -53,6 +59,7 @@ VIEWER_CONFIG = ViewerConfig()
 # MergedRows
 # What:  the columns of merged.csv the panel needs, as NumPy arrays (NaN = blank).
 # Data structures: dataclass of arrays + list of phase names.
+# Time:  O(1) to build (references to the arrays).
 # ---------------------------------------------------------------------------
 @dataclass
 class MergedRows:
@@ -73,6 +80,8 @@ class MergedRows:
 # ---------------------------------------------------------------------------
 def load_merged(path: Path) -> MergedRows:
     """merged.csv as arrays."""
+    # Time:  O(1).
+    # Data structures: a str in, a float out (NaN for a blank cell).
     def number(text: str) -> float:
         return float(text) if text not in ("", None) else math.nan
 

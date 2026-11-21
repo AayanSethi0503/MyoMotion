@@ -16,6 +16,14 @@
 // Board: "ESP32 Dev Module".
 // USB Serial Monitor (115200 baud): network details while waiting; while connected, a health line every
 // 5 s, including how long the encryption takes per batch.
+//
+// Data structures (this file): a lock-free single-producer / single-consumer ring buffer (a fixed array of
+//   2048 Sample structs + two std::atomic indices) between the sampling task and loop(); fixed char / byte
+//   arrays for the batch text, its ciphertext and the X line (global and reused, no heap); a SecureEncoder
+//   (secure_core.h) holding one filter chain per channel.
+// Time complexity (this file): O(C) per sample in the sampling task (C = 3 channels); per batch of b samples
+//   O(b * C * (S + 1)) to filter and encrypt them (S = 6 filter sections, one AES block per channel and
+//   sample) plus O(m) to seal and base64 the m-byte batch text; everything else in loop() is O(1).
 
 #include <WiFi.h>
 #include <atomic>
@@ -69,6 +77,9 @@ const unsigned long STATUS_REPORT_MS = 5000;
 // Each key is loaded once in setup() (not in a global constructor, which runs before the system and its
 // hardware drivers are fully started); the contexts are reused for every block / batch.
 // ---------------------------------------------------------------------------
+// MbedAesBlock: AES-128 on one 16-byte block (makes the homomorphic keys).
+// Time: begin O(1) (key expansion, once); encryptBlock O(1) (fixed 10 rounds in hardware).  Space: O(1).
+// Data structures: an mbedtls_aes_context (the expanded round keys), loaded once and reused.
 class MbedAesBlock : public myomotion::BlockCipher {
  public:
   bool begin(const uint8_t key[16]) {
@@ -83,6 +94,9 @@ class MbedAesBlock : public myomotion::BlockCipher {
   mbedtls_aes_context ctx_;
 };
 
+// MbedGcm: AES-128-GCM, seals one batch (encrypts it and computes its 16-byte tag).
+// Time: begin O(1); seal O(m) for m bytes (one AES block per 16 bytes + the GHASH).  Space: O(1) extra.
+// Data structures: an mbedtls_gcm_context (key + GHASH table), loaded once and reused.
 class MbedGcm : public myomotion::AeadCipher {
  public:
   bool begin(const uint8_t key[16]) {
@@ -99,6 +113,8 @@ class MbedGcm : public myomotion::AeadCipher {
   mbedtls_gcm_context ctx_;
 };
 
+// Sample: one reading of all channels.  Time O(1) to fill.  Space: 10 bytes (12 with padding).
+// Data structures: a plain struct, a 32-bit time and a fixed array of three 16-bit millivolt values.
 struct Sample {
   uint32_t timeUs;
   uint16_t millivolts[CHANNEL_COUNT];
@@ -113,6 +129,9 @@ MbedGcm linkCipher;
 myomotion::SecureEncoder encoder(heCipher, linkCipher, KEY_ID);
 
 // Ring buffer: only the sampling task moves writeIndex, only loop() moves readIndex.
+// Data structures: a fixed array + two atomic indices (one producer, one consumer, so no lock is needed);
+// one slot always stays empty to tell full from empty.  Time: O(1) push and O(1) pop.
+// Space: 2048 x 12 bytes = about 24 KB of the ESP32's RAM.
 Sample sampleBuffer[BUFFER_CAPACITY];
 std::atomic<size_t> writeIndex(0);
 std::atomic<size_t> readIndex(0);
@@ -133,6 +152,7 @@ unsigned long cryptoBatches = 0;
 bool ledIsOn = false;
 unsigned long ledOffAtMs = 0;
 
+// Time O(1): the modular difference of the two indices.  Data structures: the ring buffer's atomic indices.
 size_t samplesWaiting() {
   size_t write = writeIndex.load(std::memory_order_acquire);
   size_t read = readIndex.load(std::memory_order_relaxed);
@@ -140,6 +160,8 @@ size_t samplesWaiting() {
 }
 
 // Reads the three channels every 2 ms into the buffer (unchanged from the plain firmware).
+// Time: O(C) per 2 ms tick (C = 3 analog reads) + O(1) push.  Space: O(1) (one Sample on the stack).
+// Data structures: a Sample struct; the ring buffer (the newest sample is dropped and counted when full).
 void samplingTask(void* unused) {
   (void)unused;
   TickType_t lastWake = xTaskGetTickCount();
@@ -161,10 +183,13 @@ void samplingTask(void* unused) {
   }
 }
 
+// Time O(1): the read index jumps to the write index (samples are skipped, not erased).
+// Data structures: the ring buffer's atomic indices.
 void clearBuffer() {
   readIndex.store(writeIndex.load(std::memory_order_acquire), std::memory_order_release);
 }
 
+// Time O(n) for n bytes handed to the TCP stack.  Data structures: a char array (not copied).
 void sendToLaptop(const char* text, size_t length) {
   if (length == 0) {
     return;
@@ -176,6 +201,8 @@ void sendToLaptop(const char* text, size_t length) {
 }
 
 // Seals the batch text and sends it as one X line.
+// Time O(m) for m bytes of batch text (AES-GCM + base64).
+// Data structures: the global batch, ciphertext and frame arrays.
 void sealAndSend(size_t textLength) {
   size_t length = encoder.seal(batchText, textLength, cipherScratch, frameOut, sizeof(frameOut));
   if (length == 0) {
@@ -186,6 +213,7 @@ void sealAndSend(size_t textLength) {
 }
 
 // Turns the sync LED on and sends the moment, sealed like everything else.
+// Time O(1): one short E line sealed and sent.  Data structures: a 48-byte char array on the stack.
 void flashSyncLed() {
   digitalWrite(SYNC_LED_PIN, HIGH);
   unsigned long flashUs = micros();
@@ -200,6 +228,7 @@ void flashSyncLed() {
   Serial.println("Sync flash sent");
 }
 
+// Time O(1).  Data structures: none (a wrap-safe comparison of millis() with the off time).
 void updateSyncLed() {
   if (ledIsOn && (long)(millis() - ledOffAtMs) >= 0) {
     digitalWrite(SYNC_LED_PIN, LOW);
@@ -207,6 +236,7 @@ void updateSyncLed() {
   }
 }
 
+// Time O(k) for k command bytes waiting.  Data structures: none (one char at a time from the TCP socket).
 void handleLaptopCommands() {
   while (laptop.available() > 0) {
     char command = (char)laptop.read();
@@ -217,6 +247,8 @@ void handleLaptopCommands() {
 }
 
 // New connection: new random session (hardware random number generator), hello line in clear.
+// Time O(1) per call; on a new connection O(S * C) to design the filters again (S = 6 sections, C = 3).
+// Data structures: an 8-byte random session array; a 64-byte hello line; the WiFiClient.
 void checkConnection() {
   if (server.hasClient()) {
     WiFiClient incoming = server.accept();
@@ -254,6 +286,9 @@ void checkConnection() {
 }
 
 // Filters, squares and encrypts the waiting samples (D + P lines), seals them and sends one X line.
+// Time: O(b * C * (S + 1)) for b <= 30 samples (S filter steps and one AES block per channel and sample),
+//   plus O(m) to seal and base64 the m-byte batch.  Space: O(1) extra (the global arrays are reused).
+// Data structures: the ring buffer (pop); the global batch text, ciphertext and frame arrays.
 void sendWaitingSamples() {
   if (samplesWaiting() < SAMPLES_PER_BATCH) {
     return;
@@ -281,6 +316,7 @@ void sendWaitingSamples() {
   samplesSent += count;
 }
 
+// Time O(1): at most one status line every 5 s.  Data structures: counters (unsigned long).
 void reportStatus() {
   if ((long)(millis() - nextStatusReportMs) < 0) {
     return;
@@ -313,6 +349,8 @@ void reportStatus() {
   cryptoBatches = 0;
 }
 
+// Time O(1): two AES key expansions, the Wi-Fi access point, one task started.
+// Data structures: the two cipher objects; the sampling task (FreeRTOS, pinned to core 1).
 void setup() {
   Serial.begin(USB_BAUD);
   pinMode(SYNC_LED_PIN, OUTPUT);
@@ -340,6 +378,8 @@ void setup() {
   Serial.println(KEY_ID);
 }
 
+// Time per pass: O(1) + at most one batch (see sendWaitingSamples); 1 ms pause so the Wi-Fi stack can run.
+// Data structures: everything above; nothing allocated here.
 void loop() {
   if (!wifiStarted) {
     delay(100);

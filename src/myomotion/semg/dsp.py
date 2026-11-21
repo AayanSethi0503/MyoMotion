@@ -19,6 +19,13 @@ Two kinds of tool live here:
   * time domain: IIR biquad filters and RMS envelopes that work on a whole array OR one sample
     at a time (Step 5 will use the sample-by-sample form for live %MVC).
 All core maths is written out here; NumPy is used only for arrays and element-wise arithmetic.
+
+Data structures (this file): NumPy float64 arrays for signals; Biquad dataclasses (five coefficients, two state
+    values); a list of Biquads as the filter chain (EmgFilter); a deque with maxlen as a ring buffer (RunningRms);
+    boolean NumPy masks over the spectrum bins.
+Time complexity (this file): filtering and the envelope O(N * S) for N samples, S = 6 filter sections; RMS and
+    moving average O(N); power_spectrum O(N^2) (our own direct DFT, fine for N <= 2500); live use O(S) per sample
+    and O(1) for the running RMS.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -40,6 +47,7 @@ BUTTERWORTH_4_QS = (1 / (2 * math.cos(math.pi / 8)), 1 / (2 * math.cos(3 * math.
 # What:  every frequency and window length the processing uses, in one place.
 # Data structures: a frozen dataclass, so a value cannot be changed by accident and
 #        a typo in a field name fails at once.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DspConfig:
@@ -221,6 +229,7 @@ def emg_band_rms(values: np.ndarray, rate_hz: float, cfg: DspConfig = DSP_CONFIG
 # Data structures: a dataclass holding five float coefficients and two float
 #        states. The state is what lets it run one sample at a time (live) and
 #        continue exactly where it left off.
+# Time:  O(1) per sample (step); O(n) to filter n samples.  Space: O(1).
 # ---------------------------------------------------------------------------
 @dataclass
 class Biquad:
@@ -346,6 +355,7 @@ def notch_biquad(centre_hz: float, rate_hz: float, bandwidth_hz: float) -> Biqua
 #        Works on a whole recording (filter) or one sample at a time (step).
 # Data structures: a list of Biquad sections, applied in order. A list because the
 #        order is fixed and we walk it front to back for every sample.
+# Time:  O(S) per sample for S = 6 sections; O(n * S) for n samples.  Space: O(S).
 # ---------------------------------------------------------------------------
 @dataclass
 class EmgFilter:
@@ -513,6 +523,7 @@ def emg_envelope(values: np.ndarray, rate_hz: float, cfg: DspConfig = DSP_CONFIG
 #        (Over very long sessions rounding could build up; recompute() resets it.)
 # Data structures: a deque with maxlen = window as a ring buffer: appending to a
 #        full deque drops the oldest value in O(1), unlike list.pop(0) which is O(n).
+# Time:  O(1) per sample (step); O(window) to recompute.  Space: O(window).
 # ---------------------------------------------------------------------------
 @dataclass
 class RunningRms:

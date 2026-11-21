@@ -22,6 +22,12 @@ Afterwards the set is synced at once (src/myomotion/sync/session.py): merged.csv
 
 Thin command-line wrapper: the recording is src/myomotion/sync/recorder.py (record_set).
 Exit code 0 = recorded and synced (TC03 PASS or NOT MEASURED), 1 = something failed.
+
+Data structures (this file): an argparse Namespace; SetPlan, RecordingResult, CvRun and SyncResult dataclasses; the
+    recorder's threads and buffers (see recorder.py).
+Time complexity (this file): recording is real time, O(F + N) for F frames and N samples; afterwards the CV pass O(F
+    * P) for P pixels, the sync O(N + F) (laptop clock) or O(F * P) (LED search), the envelope O(N * S) (N samples,
+    S = 6 filter sections) and the synced video O(F * P).
 """
 
 from __future__ import annotations

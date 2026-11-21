@@ -13,6 +13,11 @@ ciphertexts, still encrypted) and link.json (session and key id). Two roles, kep
      (decrypt_windows).
 The result must equal the envelope computed in the clear from emg.csv with the same filter
 (plain_envelope). Writes he.json and he.png into the folder. Exit code 0 = match, 1 = mismatch.
+
+Data structures (this file): NumPy uint64 arrays for the ciphertexts and the encrypted window sums; NumPy float64
+    arrays for the envelopes; a dict for he.json; a matplotlib figure.
+Time complexity (this file): O(N * C) for N samples and C channels (sliding sums, one keystream block per sample and
+    channel), plus O(N * S) for the plain envelope it is compared with (N samples, S = 6 filter sections).
 """
 
 from __future__ import annotations

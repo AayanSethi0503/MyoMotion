@@ -14,6 +14,12 @@ test TC03 measures (SRS limit: 33 ms, one frame at 30 fps).
 Then every frame gets the sEMG value at its own moment (straight-line interpolation between the two
 samples around it) and a rep phase: from Ahmad's CV summary JSON when given (phases seen in the video), or
 else from the recorder's own cues (phases the person was told to do).
+
+Data structures (this file): ClockFit, SyncReport and PhaseInterval dataclasses; NumPy float64 arrays; Python lists
+    for the two-pointer interpolation walk; lists of per-frame phase labels.
+Time complexity (this file): O(F) to fit and check the clock line over F flashes; O(N + M) to interpolate N samples
+    onto M frames (two pointers that only move forward); O(M + I) to label M frames with I phase intervals; O(N * I)
+    for the per-phase statistics.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -34,6 +40,7 @@ PPM = 1e6                             # parts per million
 # SyncConfig  (the CONFIG for this file)
 # What:  the TC03 limit and the drift sanity limit.
 # Data structures: a frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SyncConfig:
@@ -50,6 +57,7 @@ SYNC_CONFIG = SyncConfig()
 # ClockFit
 # What:  the fitted line between the two clocks, and how far each flash is from it.
 # Data structures: a frozen dataclass; residuals as a tuple (fixed once fitted).
+# Time:  O(1) to build; to_video_s / to_esp32_us are O(n) for n times.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ClockFit:
@@ -64,11 +72,15 @@ class ClockFit:
     video_ref_s: float                # the fitted video time at that anchor
     residuals_ms: tuple[float, ...]   # each flash's video time minus the line, in milliseconds
 
+    # Time:  O(1).
+    # Data structures: a float.
     @property
     def drift_ppm(self) -> float:
         """How much faster the video clock runs than the ESP32's (parts per million)."""
         return (self.slope - 1.0) * PPM
 
+    # Time:  O(1).
+    # Data structures: a float.
     @property
     def esp32_s_at_video_start(self) -> float:
         """What the ESP32 clock read when the video started (video time 0), in seconds."""
@@ -86,6 +98,8 @@ class ClockFit:
         relative_s = (np.asarray(t_us) - self.esp32_ref_us).astype(np.float64) / US_PER_S
         return self.video_ref_s + self.slope * relative_s
 
+    # Time:  O(n) for n times.  Space: O(n).
+    # Data structures: a NumPy float64 array (or one float).
     def to_esp32_us(self, t_video_s: np.ndarray | float) -> np.ndarray | float:
         """Video time (s) -> ESP32 time (us)."""
         relative_s = (np.asarray(t_video_s, dtype=np.float64) - self.video_ref_s) / self.slope
@@ -130,6 +144,7 @@ def fit_clock(esp32_us: list[int], video_s: list[float]) -> ClockFit:
 #        flash was not used to draw the line). With only 2 flashes there is nothing to
 #        check against, so the verdict is NOT MEASURED.
 # Data structures: frozen dataclass; tuples for the per-flash numbers.
+# Time:  O(F) to build for F check flashes; verdict is O(F).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SyncReport:
@@ -142,6 +157,8 @@ class SyncReport:
     max_check_error_ms: float
     drift_plausible: bool             # info: False suggests the flashes were paired wrongly
 
+    # Time:  O(F) for the F check flashes.  Space: O(1).
+    # Data structures: a tuple of floats; a str out.
     @property
     def verdict(self) -> str:
         """PASS, FAIL or NOT MEASURED (no middle flash)."""
@@ -210,6 +227,7 @@ def interpolate_sorted(x_known: np.ndarray, y_known: np.ndarray, x_new: np.ndarr
 # PhaseInterval
 # What:  one phase of one rep on the video clock, named as in events.csv.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PhaseInterval:

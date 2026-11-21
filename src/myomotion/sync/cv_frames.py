@@ -15,6 +15,13 @@ src/myomotion/coaching/overlay.py: USED here, never changed) and the sync (src/m
 Frame times: the camera's own times from video_frames.csv (the clock the LED search uses) when the synced
 recorder wrote one, else the video file's timestamps (his iter_video_frames). The same clock as the LED search,
 so cv_frames.csv joins merged.csv by time and his rep times are already on the video clock.
+
+Data structures (this file): Ahmad's PoseTracker / SpinePoseTracker / DeadliftAnalyzer objects behind a CvEngine;
+    CurlAnalyzer or RdlCounter for the demo exercises; a dict column -> text per CSV row; a one-slot mailbox under a
+    threading.Condition (LiveCv); a CvRun dataclass; a dict phase -> frame count.
+Time complexity (this file): O(F * P) for F frames of P pixels: the networks dominate (MediaPipe 14-61 ms +
+    SpinePose 15-20 ms per frame on this laptop); the analysers are O(1) per frame; writing the CSV O(F * K) for K
+    columns; LiveCv.submit O(1).
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -68,6 +75,7 @@ CV_COLUMNS = (
 # CvConfig
 # What:  every setting of the CV run in one place (no magic numbers below).
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CvConfig:
@@ -149,6 +157,8 @@ def resolve_spine(cfg: CvConfig = CV_CONFIG) -> tuple[str, Any, str]:
 class CvEngine:
     """Per-frame exercise analysis behind one call (Ahmad's deadlift, or the curl tracker)."""
 
+    # Time:  O(1) here, plus loading the models (MediaPipe about 1 s, SpinePose 1-10 s).  Space: the models.
+    # Data structures: PoseTracker, SpinePoseTracker, DeadliftAnalyzer or CurlAnalyzer, RdlCounter.
     def __init__(self, cfg: CvConfig = CV_CONFIG, pose_tracker: Any = None, spine_tracker: Any = None,
                  spine_mode: str | None = None, exercise: str = "deadlift") -> None:
         self.cfg = cfg
@@ -176,6 +186,9 @@ class CvEngine:
         self.frames = 0
         self.spine_rejected = 0           # > SpinePose points dropped because they disagreed with the pose
 
+    # Time:  O(P) per frame for the P pixels the networks read (MediaPipe 14-61 ms + SpinePose 15-20 ms on this
+    #        laptop); the analysers are O(1).  Space: O(P).
+    # Data structures: a NumPy image; [33, 3] landmark arrays; a FrameResult / CurlFrame / RdlFrame out.
     def process(self, image: np.ndarray, t_s: float) -> FrameResult:
         """Analyse one BGR frame taken at t_s seconds (strictly increasing)."""
         height, width = image.shape[:2]
@@ -196,6 +209,8 @@ class CvEngine:
         self.frames += 1
         return self.rdl.update(t_s, result) if self.rdl is not None else result
 
+    # Time:  O(P) for the SpinePose network on the person box.  Space: O(P).
+    # Data structures: a landmark array; a 4-value box; a SpineDetection with a [9, 3] array.
     def _detect_spine(self, image: np.ndarray, landmarks: np.ndarray, image_wh: tuple[int, int]) -> np.ndarray | None:
         """SpinePose's nine spine points inside the person's box, or None when they disagree with MediaPipe."""
         from myomotion.vision.spine_model import bridge_error, person_bbox
@@ -210,6 +225,8 @@ class CvEngine:
         self.spine_rejected += 1
         return None
 
+    # Time:  O(P) for the image pixels the overlay touches.  Space: O(1) extra (in place).
+    # Data structures: a NumPy image.
     def draw(self, image: np.ndarray, result: FrameResult) -> np.ndarray:
         """The overlay (his for the deadlift: skeleton, spine, phase, angles, cues) drawn onto image, in place."""
         if self.is_curl:
@@ -222,6 +239,8 @@ class CvEngine:
             return draw_rdl_hud(image, result)
         return self._renderer.render(image, result, self.analyzer)
 
+    # Time:  O(K) for the K columns.  Space: O(K).
+    # Data structures: a dict column -> text.
     def row(self, frame: int, t_s: float, result: Any, process_ms: float) -> dict[str, str]:
         """One cv_frames.csv row for this exercise."""
         if self.is_curl:
@@ -231,6 +250,8 @@ class CvEngine:
                     "phase_label": RDL_PHASE_LABELS[result.phase], "rep_count": str(result.rep_count)}
         return frame_row(frame, t_s, result, process_ms, self.cfg)
 
+    # Time:  O(R + T) for R reps and T phase changes.  Space: O(R + T).
+    # Data structures: a dict (JSON-ready).
     def summary(self, meta: dict[str, Any]) -> dict[str, Any]:
         """The session summary (his schema myomotion.deadlift_session/1, or the curl's) with our meta."""
         if self.is_curl:
@@ -239,6 +260,8 @@ class CvEngine:
                                          "spine_rejected_by_bridge_check": self.spine_rejected})
         return self.rdl.summary(summary) if self.rdl is not None else summary
 
+    # Time:  O(1).
+    # Data structures: releases the model objects.
     def close(self, keep_spine: bool = False) -> None:
         """Release MediaPipe (and SpinePose unless keep_spine: it can be handed to the next engine)."""
         self.pose.close()
@@ -256,6 +279,8 @@ class CvEngine:
 # ---------------------------------------------------------------------------
 def frame_row(frame: int, t_s: float, result: FrameResult, cv_ms: float, cfg: CvConfig = CV_CONFIG) -> dict[str, str]:
     """One row of cv_frames.csv."""
+    # Time:  O(1).
+    # Data structures: a float (or None) in, a str out.
     def number(value: float | None) -> str:
         return "" if value is None or not np.isfinite(value) else f"{value:.{cfg.decimals}f}"
 
@@ -321,6 +346,7 @@ def video_frames(video: Path, frame_times: np.ndarray | None) -> Iterator[tuple[
 # CvRun
 # What:  what one analyze_video call produced.
 # Data structures: dataclass.
+# Time:  O(P) to build for the P phase counts.
 # ---------------------------------------------------------------------------
 @dataclass
 class CvRun:
@@ -405,6 +431,9 @@ def analyze_video(video: Path, out_folder: Path, frame_times: np.ndarray | None 
                  video_path=(out_folder / CV_VIDEO_NAME) if writer is not None else None, phase_frames=phase_frames)
 
 
+GOOD_TRACKING_SHARE = 0.9          # below this share of frames the summary says how to film better
+
+
 # ---------------------------------------------------------------------------
 # run_report(run, exercise)
 # What:  the printed summary of a CV pass, in the exercise's own words: for the curl
@@ -412,9 +441,6 @@ def analyze_video(video: Path, out_folder: Path, frame_times: np.ndarray | None 
 #        (shoulder to ankle) and "back only"; plus what to fix when tracking was poor.
 # Time / Space: O(P) phases.  Data structures: list of lines.  Files used: none.
 # ---------------------------------------------------------------------------
-GOOD_TRACKING_SHARE = 0.9          # below this share of frames the summary says how to film better
-
-
 def run_report(run: CvRun, exercise: str) -> str:
     """Summary lines of one analyze_video run."""
     phases = ", ".join(f"{name} {count}" for name, count in sorted(run.phase_frames.items()))
@@ -438,6 +464,8 @@ def run_report(run: CvRun, exercise: str) -> str:
     return "\n".join(lines)
 
 
+# Time:  O(1) (opens the file; the caller writes the frames).  Space: O(1).
+# Data structures: a cv2.VideoCapture (to read the frame rate) and a cv2.VideoWriter.
 def _open_writer(path: Path, video: Path, frame: np.ndarray, cfg: CvConfig):
     """A VideoWriter for cv_annotated.mp4 at the source video's nominal frame rate."""
     import cv2
@@ -479,6 +507,8 @@ def find_cv_outputs(folder: Path) -> tuple[Path | None, Path | None]:
 class LiveCv(threading.Thread):
     """Analyse the newest camera frame in the background; hand back the annotated frame."""
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: a threading.Condition; a one-slot mailbox (tuple or None).
     def __init__(self, engine: CvEngine) -> None:
         super().__init__(daemon=True)
         self.engine = engine
@@ -491,6 +521,8 @@ class LiveCv(threading.Thread):
         self.skipped = 0
         self.error: str | None = None
 
+    # Time:  O(1): never waits for the CV.  Space: O(1).
+    # Data structures: the one-slot mailbox under the Condition (the newest frame replaces a waiting one).
     def submit(self, frame: np.ndarray, t_s: float) -> None:
         """Offer the newest frame (never blocks). Times must increase."""
         with self._cond:
@@ -499,11 +531,15 @@ class LiveCv(threading.Thread):
             self._pending = (frame, t_s)
             self._cond.notify()
 
+    # Time:  O(1).
+    # Data structures: the last annotated NumPy image (returned by reference).
     def latest(self) -> np.ndarray | None:
         """The most recent frame with the overlay drawn on it, or None before the first one."""
         with self._cond:
             return self._latest
 
+    # Time:  O(P) per analysed frame (CvEngine.process + draw); otherwise it waits.  Space: O(P) for one image copy.
+    # Data structures: the Condition-guarded mailbox; a NumPy image copy.
     def run(self) -> None:
         while True:
             with self._cond:
@@ -526,6 +562,8 @@ class LiveCv(threading.Thread):
                 self._latest = view
                 self.analysed += 1
 
+    # Time:  O(1), plus waiting for the thread (at most timeout_s).
+    # Data structures: Condition.notify; a bool flag.
     def stop(self, timeout_s: float = 2.0) -> None:
         """Stop the thread and wait for it."""
         with self._cond:

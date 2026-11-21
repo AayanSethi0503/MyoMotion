@@ -17,6 +17,12 @@ Wi-Fi trip. Together they are one constant, measured once end to end against the
 
 Every LED-synced webcam recording measures it again (sync.json "clock_check"), so the number can be kept honest.
 Phone video has no laptop times: it still needs the LED (src/myomotion/sync/led_sync.py).
+
+Data structures (this file): NumPy arrays of device and laptop times; a dict window -> fastest (time, delay) while
+    scanning; EnvelopeLine and LaptopClock dataclasses (with a dict of arrays kept for the plot).
+Time complexity (this file): O(N + F) for N sEMG samples and F frames (one pass to bucket the fastest arrivals, a
+    least-squares line through the W window minima in O(W), one refit without outliers); O(L) to check L LED
+    flashes.
 """
 
 from __future__ import annotations   # > type hints are stored as text, not run: allows forward references
@@ -39,6 +45,7 @@ FRAMES_NAME = "video_frames.csv"
 # ClockSyncConfig  (the CONFIG for this file)
 # What:  the window for the fastest-arrival search and the camera delay.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build (fixed fields).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ClockSyncConfig:
@@ -61,6 +68,7 @@ CLOCK_CONFIG = ClockSyncConfig()
 # What:  delay = intercept + slope * t through the fastest arrivals of one stream, and
 #        how far above it the typical arrival sits.
 # Data structures: frozen dataclass.
+# Time:  O(1) to build; at() is O(n) for n times.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class EnvelopeLine:
@@ -71,6 +79,8 @@ class EnvelopeLine:
     windows: int                       # how many per-second minima went into the line
     median_delay_ms: float             # typical arrival delay above the line (information)
 
+    # Time:  O(n) for n times.  Space: O(n).
+    # Data structures: a NumPy float64 array (or one float).
     def at(self, t_s: np.ndarray | float) -> np.ndarray | float:
         """Laptop minus device time at device time t_s."""
         return self.intercept_s + self.slope * np.asarray(t_s, dtype=np.float64)
@@ -112,6 +122,8 @@ def lower_envelope_line(t_s: np.ndarray, delay_s: np.ndarray, cfg: ClockSyncConf
                         median_delay_ms=float(np.median(above)) * MS_PER_S)
 
 
+# Time:  O(W) for the W window minima.  Space: O(W).
+# Data structures: NumPy float64 arrays; a (slope, intercept) tuple out.
 def _least_squares(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     """(slope, intercept) of the least-squares line y = intercept + slope * x."""
     x_mean, y_mean = float(np.sum(x)) / len(x), float(np.sum(y)) / len(y)
@@ -130,6 +142,7 @@ def _least_squares(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 #        Solved for t this is a straight line in u, i.e. an ordinary ClockFit, so the rest
 #        of the sync (session.py: interpolation, merged.csv, phases) works unchanged.
 # Data structures: frozen dataclass; the raw delays kept for the plot.
+# Time:  O(1) to build; to_clock_fit() is O(1).
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class LaptopClock:
@@ -141,6 +154,8 @@ class LaptopClock:
     camera_delay_ms: float
     trace: dict = field(default_factory=dict, repr=False, compare=False)   # delays for sync.png
 
+    # Time:  O(1).  Space: O(1).
+    # Data structures: returns an align.ClockFit dataclass.
     def to_clock_fit(self) -> ClockFit:
         """The same line as an align.ClockFit: t_video = video_ref + slope * (t_esp32_us - ref) / 1e6."""
         delay_s = self.camera_delay_ms / MS_PER_S
@@ -148,6 +163,8 @@ class LaptopClock:
         video_ref = (self.esp32.intercept_s + delay_s - self.camera.intercept_s) / (1.0 + self.camera.slope)
         return ClockFit(slope=slope, esp32_ref_us=self.esp32_origin_us, video_ref_s=video_ref, residuals_ms=())
 
+    # Time:  O(1).
+    # Data structures: a float.
     @property
     def drift_ppm(self) -> float:
         """ESP32 clock against the camera clock, parts per million."""

@@ -19,6 +19,11 @@ Thin command-line wrapper: the logic lives in src/myomotion/sync/ (led_sync.py, 
 Writes merged.csv, sync.json, sync.png and synced_view.mp4 (the video, with Ahmad's overlay when there is a
 cv_annotated.mp4, beside the synced %MVC) into the folder. Exit code 0 = PASS or NOT MEASURED, 1 = FAIL
 or the sync could not be done.
+
+Data structures (this file): an argparse Namespace; a SyncResult; a matplotlib figure; dicts of NumPy arrays for the
+    laptop-clock plot.
+Time complexity (this file): decoding the video dominates (O(T * P) for T frames of P pixels, twice when the LED is
+    searched); the envelope O(N * S) (N samples, S = 6 filter sections); with --cv the CV pass O(T * P).
 """
 
 from __future__ import annotations
@@ -115,6 +120,8 @@ def plot_sync(result: SyncResult, out_path: Path) -> None:
     plt.close(figure)
 
 
+# Time:  O(T + L) for T frames of LED brightness and L flashes.  Space: O(T).
+# Data structures: NumPy arrays from the LedTrace; matplotlib axes; a Rectangle patch for the LED box.
 def _plot_led(led_axis, snap_axis, result: SyncResult) -> None:
     """Top row for the LED method: brightness + flashes, and the LED box."""
     from matplotlib.patches import Rectangle
@@ -143,6 +150,8 @@ def _plot_led(led_axis, snap_axis, result: SyncResult) -> None:
     snap_axis.axis("off")
 
 
+# Time:  O(N / step + F): at most max_points sEMG delays and F frame delays are drawn.  Space: O(N / step + F).
+# Data structures: the LaptopClock's trace (dict of NumPy arrays), thinned with a slice step; matplotlib axes.
 def _plot_laptop_clock(clock_axis, text_axis, result: SyncResult) -> None:
     """Top row for the laptop-clock method: arrival delays above the fitted lines, and the numbers."""
     clock, fit = result.clock, result.fit
