@@ -13,7 +13,9 @@ Exit code 0 = TC01 passed, 1 = failed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 # > This file is scripts/semg/check_quality.py, so parents[2] is the repo root and the
@@ -24,8 +26,8 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from myomotion.semg.dsp import EmgFilter, emg_envelope  # noqa: E402
-from myomotion.semg.quality import (CONFIG, Recording, check_quality, format_report, load_recording,  # noqa: E402
-                                    measured_rate_hz, save_report)
+from myomotion.semg.quality import (CONFIG, Recording, ceiling_for, check_quality, format_report,  # noqa: E402
+                                    load_recording, measured_rate_hz, save_report)
 
 # > Plot settings (the plot's own CONFIG): phase colours match the recorder's plot.png.
 PLOT_CONFIG = {
@@ -122,8 +124,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     folder = args.folder.expanduser()                    # > turns "~" into /home/<you>
     recording = load_recording(folder, args.channel)
-    report = check_quality(recording)
-    print(format_report(report))
+    # > the biased /5 circuit (rebuild of 20 Nov) clips at the module's limit, ~2710 mV, not the ADC's 3100 mV
+    values_note = json.loads((folder / "metadata.json").read_text()).get("values", "")
+    cfg = replace(CONFIG, ceiling_mv=ceiling_for(values_note))
+    report = check_quality(recording, cfg)
+    print(format_report(report, cfg))
     print(f"\nSaved {save_report(report, folder)}")
     if not args.no_plot:
         plot_path = save_plot(recording, folder)

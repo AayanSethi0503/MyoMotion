@@ -73,6 +73,24 @@ class QualityConfig:
 
 CONFIG = QualityConfig()
 
+# > Rebuild of 20 Nov: a 10 kOhm bias to D32 lifts the module's 0 V to ~1.32 V and divides by 5. The module's
+# > output tops out near +7 V (seen flat at 2320 mV on the old /3 divider, S20), which is now ~2710 mV at the pin,
+# > below the ADC's 3100 mV: clipping must be judged against the module's limit, not the ADC's.
+BIAS_CIRCUIT_MARK = "bias to D32"     # text record_session.py writes into metadata["values"] for this circuit
+BIASED_CEILING_MV = 2710.0            # +7 V / 5 + 1.32 V
+
+
+# ---------------------------------------------------------------------------
+# ceiling_for(values_note)
+# What:  the clipping ceiling (mV at the pin) for the circuit a recording was made
+#        with: 2710 mV for the biased /5 circuit, else the ADC's 3100 mV.
+# Time:  O(len(note)).  Space: O(1).
+# Data structures: str search.  Files used: none (the caller reads metadata.json).
+# ---------------------------------------------------------------------------
+def ceiling_for(values_note: str) -> float:
+    """Clipping ceiling in mV for this recording's circuit."""
+    return BIASED_CEILING_MV if BIAS_CIRCUIT_MARK in (values_note or "") else CONFIG.ceiling_mv
+
 
 # ---------------------------------------------------------------------------
 # Cue
