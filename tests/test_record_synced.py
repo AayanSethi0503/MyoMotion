@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from myomotion.semg.acquisition import AcquisitionConfig, EspStream, LineParser
 from myomotion.sync.cv_frames import LiveCv
@@ -206,3 +207,59 @@ def test_record_set_without_the_led_syncs_on_the_laptop_clock(tmp_path: Path) ->
     synced = sync_recording(folder, folder / "video.mp4", mvc_path=None)
     assert synced.method == "clock" and synced.report.verdict == "NOT MEASURED"
     assert synced.frames_with_emg >= result.frames - 2 and abs(synced.fit.drift_ppm) < 1000
+
+
+def test_camera_settings_per_operating_system() -> None:
+    from myomotion.sync.recorder import camera_settings
+    linux, mac, other = camera_settings("linux"), camera_settings("darwin"), camera_settings("win32")
+    assert (linux.backend_name, linux.manual_exposure, linux.driver_stamps) == ("V4L2", True, True)
+    assert (mac.backend_name, mac.manual_exposure, mac.driver_stamps) == ("AVFOUNDATION", False, False)
+    assert (other.backend_name, other.driver_stamps) == ("ANY", False)
+
+
+class FakeCapture:
+    """Stands in for cv2.VideoCapture: remembers how it was opened and what was set."""
+
+    opened_with: list = []
+
+    def __init__(self, index, backend) -> None:
+        FakeCapture.opened_with.append(backend)
+        self.props: dict = {}
+
+    def isOpened(self) -> bool:
+        return True
+
+    def set(self, prop, value) -> bool:
+        self.props[prop] = value
+        return True
+
+    def get(self, prop) -> float:
+        return 1234.0                                  # > a driver time that macOS must ignore
+
+    def read(self):
+        return True, np.zeros((4, 4, 3), np.uint8)
+
+    def release(self) -> None:
+        pass
+
+
+def test_the_webcam_on_macos_uses_avfoundation_auto_exposure_and_laptop_times(monkeypatch) -> None:
+    import cv2
+    from myomotion.sync.recorder import Webcam
+    monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+    mac = Webcam(0, exposure=300.0, platform="darwin")
+    assert FakeCapture.opened_with[-1] == cv2.CAP_AVFOUNDATION
+    assert cv2.CAP_PROP_EXPOSURE not in mac.cap.props and not mac.fixed_exposure
+    assert mac.read()[2] is None                       # > the recorder then stamps the frame with the laptop clock
+    assert mac.info["frame_times"] == "laptop clock at read"
+    linux = Webcam(0, exposure=300.0, platform="linux")
+    assert FakeCapture.opened_with[-1] == cv2.CAP_V4L2 and linux.cap.props[cv2.CAP_PROP_EXPOSURE] == 300.0
+    assert linux.read()[2] == pytest.approx(1.234)
+
+
+def test_record_synced_takes_a_camera_delay() -> None:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "sync"))
+    import record_synced
+    assert record_synced.parse_args(["--camera-delay-ms", "25"]).camera_delay_ms == 25.0
+    assert record_synced.parse_args([]).camera_delay_ms == pytest.approx(10.7)

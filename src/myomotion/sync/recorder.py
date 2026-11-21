@@ -21,6 +21,7 @@ from __future__ import annotations   # > type hints are stored as text, not run:
 import csv
 import json
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -419,34 +420,76 @@ def compose_cv_view(annotated: np.ndarray, step: Step | None, reps: int, seconds
 
 
 # ---------------------------------------------------------------------------
+# CameraSettings / camera_settings(platform)
+# What:  how to open the laptop camera on this operating system:
+#          Linux  V4L2: a fixed exposure can be set (units of 0.1 ms) and the driver
+#                 stamps every frame (CAP_PROP_POS_MSEC);
+#          macOS  AVFoundation: OpenCV cannot fix the exposure, and the frame time is
+#                 taken from the laptop clock the moment the frame is read, the same
+#                 clock for every frame (the laptop-clock sync only needs one steady
+#                 clock; its constant camera delay is measured once with the LED);
+#          other  OpenCV's default backend, laptop-clock frame times.
+# Time / Space: O(1).  Data structures: frozen dataclass.  Files used: none.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CameraSettings:
+    """What this computer's camera backend can do."""
+
+    backend_name: str          # suffix of the cv2.CAP_* constant: "V4L2", "AVFOUNDATION" or "ANY"
+    manual_exposure: bool      # OpenCV can set a fixed exposure
+    driver_stamps: bool        # the driver gives a usable per-frame timestamp
+    note: str                  # one line for the console and metadata.json
+
+
+def camera_settings(platform: str = sys.platform) -> CameraSettings:
+    """Camera settings for an operating system (sys.platform value)."""
+    if platform.startswith("linux"):
+        return CameraSettings("V4L2", True, True, "Linux camera (V4L2): fixed exposure, driver frame times")
+    if platform == "darwin":
+        return CameraSettings("AVFOUNDATION", False, False,
+                              "macOS camera (AVFoundation): automatic exposure, frame times from the laptop clock")
+    return CameraSettings("ANY", False, False, f"{platform} camera (OpenCV default): frame times from the laptop clock")
+
+
+# ---------------------------------------------------------------------------
 # Webcam
-# What:  the laptop camera through OpenCV (V4L2): fixed size and 30 fps, optionally a
+# What:  the laptop camera through OpenCV: fixed size and 30 fps; on Linux optionally a
 #        fixed exposure (auto exposure drops to ~10 fps in a dim room, too slow for
-#        sync), and the driver's timestamp of every frame. Auto exposure is restored
-#        on close.
-# Data structures: cv2.VideoCapture.  Files used: /dev/video<index>.
+#        sync) and the driver's timestamp of every frame; on macOS automatic exposure
+#        and no driver times (camera_settings above). Auto exposure is restored on close.
+# Data structures: cv2.VideoCapture; CameraSettings.
+# Files used: /dev/video<index> on Linux; the built-in camera on macOS.
 # ---------------------------------------------------------------------------
 class Webcam:
-    """Laptop camera with per-frame driver timestamps."""
+    """Laptop camera with per-frame timestamps where the driver gives them."""
 
-    def __init__(self, index: int = 0, width: int = 640, height: int = 480, exposure: float | None = 150.0) -> None:
+    def __init__(self, index: int = 0, width: int = 640, height: int = 480, exposure: float | None = 150.0,
+                 platform: str = sys.platform) -> None:
         import cv2
         self.cv2 = cv2
-        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        self.settings = camera_settings(platform)
+        self.cap = cv2.VideoCapture(index, getattr(cv2, "CAP_" + self.settings.backend_name, cv2.CAP_ANY))
         if not self.cap.isOpened():
-            raise RuntimeError(f"camera {index} could not be opened (is another program using it?)")
+            hint = (" On macOS allow camera access for the Terminal: System Settings > Privacy & Security > Camera."
+                    if platform == "darwin" else "")
+            raise RuntimeError(f"camera {index} could not be opened (is another program using it?){hint}")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.fixed_exposure = exposure is not None
+        self.fixed_exposure = exposure is not None and self.settings.manual_exposure
         if self.fixed_exposure:
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)      # > 1 = manual on V4L2
             self.cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+        self.info = {"backend": self.settings.backend_name, "fixed_exposure": exposure if self.fixed_exposure else None,
+                     "frame_times": "camera driver" if self.settings.driver_stamps else "laptop clock at read",
+                     "platform": platform}
 
     def read(self) -> tuple[bool, np.ndarray | None, float | None]:
-        """(ok, frame, driver timestamp in seconds or None)."""
+        """(ok, frame, driver timestamp in seconds, or None: the recorder then uses the laptop clock)."""
         ok, frame = self.cap.read()
-        stamp = self.cap.get(self.cv2.CAP_PROP_POS_MSEC) / 1000.0 if ok else None
+        if not ok or not self.settings.driver_stamps:
+            return ok, frame, None
+        stamp = self.cap.get(self.cv2.CAP_PROP_POS_MSEC) / 1000.0
         return ok, frame, (stamp if stamp and stamp > 0 else None)
 
     def close(self) -> None:
@@ -616,7 +659,9 @@ def record_set(camera, stream: EspStream, plan: SetPlan, mvc_above_rest_mv: floa
         "channels": {f"ch{i + 1}": names[i] for i in range(3)}, "channels_connected": len(plan.channels),
         "values": cfg.values_note, "aborted": aborted,
         "video": {"file": "video.mp4", "frames": len(frame_rows), "fps": round(fps, 3), "width": width,
-                  "height": height, "frame_times": "video_frames.csv (camera driver timestamps)"},
+                  "height": height, "frame_times": "video_frames.csv (t_camera_s: " + str(
+                      getattr(camera, "info", {}).get("frame_times", "camera driver")) + ")",
+                  "camera": getattr(camera, "info", None)},
         **quality,
     }
     if live_cv is not None:

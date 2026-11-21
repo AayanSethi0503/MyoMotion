@@ -36,7 +36,8 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from myomotion.semg.mvc import find_latest_mvc  # noqa: E402
-from myomotion.sync.cv_frames import CV_CONFIG, analyze_video, find_cv_outputs  # noqa: E402
+from myomotion.sync.clock_sync import CLOCK_CONFIG  # noqa: E402
+from myomotion.sync.cv_frames import CV_CONFIG, analyze_video, find_cv_outputs, run_report  # noqa: E402
 from myomotion.sync.led_sync import LedNotFound  # noqa: E402
 from myomotion.sync.session import (SYNC_METHODS, SyncResult, find_video, format_report,  # noqa: E402
                                     load_frame_times, sync_recording)
@@ -189,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spine", default="auto", choices=["auto", "spinepose", "contour", "proxy"],
                         help="with --cv: spine source (auto = SpinePose if installed, else the back contour)")
     parser.add_argument("--no-view", action="store_true", help="do not write synced_view.mp4")
+    parser.add_argument("--camera-delay-ms", type=float, default=CLOCK_CONFIG.camera_delay_ms,
+                        help="the camera's delay for the laptop-clock sync (default: the Linux webcam's)")
     parser.add_argument("--sync", default="auto", choices=list(SYNC_METHODS),
                         help="led = the LED flashes; clock = the laptop clock (webcam recordings, no LED needed); "
                              "auto = the LED if it is found, else the laptop clock")
@@ -216,7 +219,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"CV:    {cv_json or '-'}  {cv_frames or '-'}")
     try:
         result = sync_recording(folder, video, cv_json=cv_json, cv_frames=cv_frames, mvc_path=mvc,
-                                channel=args.channel, box_px=args.led_box, method=args.sync)
+                                channel=args.channel, box_px=args.led_box, method=args.sync,
+                                clock_cfg=replace(CLOCK_CONFIG, camera_delay_ms=args.camera_delay_ms))
     except (LedNotFound, ValueError) as error:
         print(f"Sync failed: {error}")
         return 1
@@ -259,9 +263,7 @@ def run_cv(folder: Path, video: Path, spine: str) -> None:
     exercise = recorded_exercise(folder)
     print(f"CV on every frame ({exercise}; loading MediaPipe) ...")
     run = analyze_video(video, folder, frame_times=load_frame_times(video), cfg=cfg, exercise=exercise)
-    print(f"CV: {run.frames} frames ({run.median_ms:.0f} ms each, {run.spine_note}); person in "
-          f"{run.frames_with_person}, fully tracked in {run.frames_tracked}, back only in {run.frames_back_only}; "
-          f"reps {run.rep_count}")
+    print(f"{run_report(run, exercise)}\n  ({run.spine_note})")
 
 
 if __name__ == "__main__":

@@ -39,8 +39,9 @@ if _SRC not in sys.path:
 
 from myomotion.semg.acquisition import AcquisitionConfig, EspStream  # noqa: E402
 from myomotion.semg.mvc import find_latest_mvc, load_mvc  # noqa: E402
+from myomotion.sync.clock_sync import CLOCK_CONFIG  # noqa: E402
 from myomotion.sync.cv_frames import (CV_CONFIG, LIVE_POSE_MODEL, POSE_MODELS, CvEngine, LiveCv,  # noqa: E402
-                                      analyze_video, pose_model_path)
+                                      analyze_video, pose_model_path, run_report)
 from myomotion.sync.led_sync import LedNotFound  # noqa: E402
 from myomotion.sync.recorder import SetPlan, Webcam, next_set_folder, record_set  # noqa: E402
 from myomotion.sync.session import SYNC_METHODS, format_report, load_frame_times, sync_recording  # noqa: E402
@@ -70,7 +71,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--mvc", type=Path, default=None, help="MVC folder or mvc.json (default: newest passed)")
     p.add_argument("--camera", type=int, default=DEFAULTS["camera"])
     p.add_argument("--exposure", default=DEFAULTS["exposure"],
-                   help="fixed exposure (keeps 30 fps in a dim room), or 'auto'")
+                   help="Linux only: fixed exposure (keeps 30 fps in a dim room), or 'auto'; a Mac always uses auto")
     p.add_argument("--width", type=int, default=DEFAULTS["width"])
     p.add_argument("--height", type=int, default=DEFAULTS["height"])
     p.add_argument("--host", default=AcquisitionConfig.host)
@@ -88,6 +89,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--spine", default="auto", choices=["auto", "spinepose", "contour", "proxy"],
                    help="with --cv: spine source (auto = SpinePose if installed, else the back contour)")
     p.add_argument("--no-sync", action="store_true", help="record only")
+    p.add_argument("--camera-delay-ms", type=float, default=CLOCK_CONFIG.camera_delay_ms,
+                   help="this camera's delay for the laptop-clock sync (default: the Linux webcam's, measured 21 Nov); "
+                        "a set where the LED is seen prints the measured value")
     p.add_argument("--sync", default="auto", choices=list(SYNC_METHODS),
                    help="clock = the laptop clock, no LED needed; led = the LED flashes; auto (default) = the LED "
                         "if the camera saw it, else the laptop clock")
@@ -146,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     folder = next_set_folder(out, args.participant, args.exercise, args.posture)
+    print(camera.settings.note)
     print(f"Recording into {folder}\nGet yourself in the camera's view (the LED does not need to be). Follow the "
           "cues in the window; press q there to stop early.")
     try:
@@ -179,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         synced = sync_recording(folder, folder / "video.mp4", cv_json=cv_json, cv_frames=cv_frames,
-                                mvc_path=mvc_path, channel=args.channel, method=args.sync)
+                                mvc_path=mvc_path, channel=args.channel, method=args.sync,
+                                clock_cfg=replace(CLOCK_CONFIG, camera_delay_ms=args.camera_delay_ms))
     except (LedNotFound, ValueError) as error:
         print(f"Sync failed: {error}\nYou can retry with scripts/sync/sync_session.py {folder} --sync clock "
               "(or --led-box x,y,w,h if the LED is in the picture)")
@@ -235,12 +241,7 @@ def run_cv(folder: Path, spine: str, live: LiveCv | None, exercise: str = "deadl
                             engine=engine, cfg=cfg)
     finally:
         engine.close()
-    phases = ", ".join(f"{name} {count}" for name, count in sorted(run.phase_frames.items()))
-    print(f"CV: {run.frames} frames ({run.median_ms:.0f} ms each), person seen in {run.frames_with_person}, fully "
-          f"tracked (shoulder to ankle) in {run.frames_tracked}, back only in {run.frames_back_only}; reps "
-          f"{run.rep_count}; frames per phase: {phases}")
-    if run.frames_tracked == 0:
-        print("  No frame was fully tracked: reps and joint angles need the whole body, side-on, in a lit room.")
+    print(run_report(run, exercise))
     print(f"Saved {run.frames_path}, {run.summary_path}" + (f" and {run.video_path}" if run.video_path else ""))
     return run.summary_path, run.frames_path
 

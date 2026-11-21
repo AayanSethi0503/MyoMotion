@@ -405,6 +405,39 @@ def analyze_video(video: Path, out_folder: Path, frame_times: np.ndarray | None 
                  video_path=(out_folder / CV_VIDEO_NAME) if writer is not None else None, phase_frames=phase_frames)
 
 
+# ---------------------------------------------------------------------------
+# run_report(run, exercise)
+# What:  the printed summary of a CV pass, in the exercise's own words: for the curl
+#        "arm seen" (shoulder, elbow, wrist), for the deadlift and RDL "whole body"
+#        (shoulder to ankle) and "back only"; plus what to fix when tracking was poor.
+# Time / Space: O(P) phases.  Data structures: list of lines.  Files used: none.
+# ---------------------------------------------------------------------------
+GOOD_TRACKING_SHARE = 0.9          # below this share of frames the summary says how to film better
+
+
+def run_report(run: CvRun, exercise: str) -> str:
+    """Summary lines of one analyze_video run."""
+    phases = ", ".join(f"{name} {count}" for name, count in sorted(run.phase_frames.items()))
+    share = run.frames_tracked / run.frames if run.frames else 0.0
+    if exercise in CURL_EXERCISES:
+        lines = [f"CV: {run.frames} frames ({run.median_ms:.0f} ms each); arm seen (shoulder, elbow, wrist) in "
+                 f"{run.frames_tracked} ({share:.0%}); reps {run.rep_count}; frames per phase: {phases}"]
+        if share < GOOD_TRACKING_SHARE:
+            lines.append("  The arm was out of view in many frames: sit about 2 m away, side-on, with your head, "
+                         "hip and hand inside the picture, in a lit room.")
+        if run.rep_count == 0 and run.frames_tracked:
+            lines.append("  No rep counted: let the arm hang straight (elbow open past 130 deg) between curls, and "
+                         "curl up to the shoulder (below 80 deg).")
+    else:
+        lines = [f"CV: {run.frames} frames ({run.median_ms:.0f} ms each); person seen in {run.frames_with_person}; "
+                 f"whole body (shoulder to ankle) in {run.frames_tracked} ({share:.0%}), back only in "
+                 f"{run.frames_back_only}; reps {run.rep_count}; frames per phase: {phases}"]
+        if run.frames_tracked == 0:
+            lines.append("  No frame showed the whole body: reps and joint angles need it side-on, 2.5-3 m away, in a "
+                         "lit room.")
+    return "\n".join(lines)
+
+
 def _open_writer(path: Path, video: Path, frame: np.ndarray, cfg: CvConfig):
     """A VideoWriter for cv_annotated.mp4 at the source video's nominal frame rate."""
     import cv2

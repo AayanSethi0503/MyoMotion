@@ -247,3 +247,13 @@ def test_curl_cv_and_semg_end_up_in_one_row_per_frame(tmp_path: Path) -> None:
     assert rows[30]["phase"] == "REST" and float(rows[30]["cv_elbow_deg"]) > 160      # > t = 1 s, arm down
     # > merged.csv's 7 own columns + every curl column as cv_* (except t_s, which is the join key)
     assert len(rows[0]) == 7 + len(CURL_COLUMNS) - 1
+
+
+def test_the_cv_summary_speaks_about_the_arm_for_a_curl() -> None:
+    from myomotion.sync.cv_frames import CvRun, run_report
+    run = CvRun(frames=670, rep_count=0, frames_tracked=307, frames_back_only=0, frames_with_person=670,
+                median_ms=48.0, spine_note="", summary={}, frames_path=Path("a"), summary_path=Path("b"),
+                phase_frames={"REST": 670})
+    text = run_report(run, "curl")
+    assert "arm seen" in text and "ankle" not in text and "2 m away" in text and "hang straight" in text
+    assert "whole body" in run_report(run, "rdl")
